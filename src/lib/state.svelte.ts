@@ -83,21 +83,6 @@ export function filteredFlows() {
   );
 }
 
-/// 按进程/应用聚合（主页 TOP 卡片与检查页数据源），尊重当前设备过滤
-export function appTop() {
-  const map = new Map<string, { program: string; rx: number; tx: number; v4: boolean; v6: boolean }>();
-  for (const f of filteredFlows()) {
-    const key = f.program;
-    const e = map.get(key) ?? { program: key, rx: 0, tx: 0, v4: false, v6: false };
-    e.rx += f.rx;
-    e.tx += f.tx;
-    if (f.family === "v4") e.v4 = true;
-    else e.v6 = true;
-    map.set(key, e);
-  }
-  return [...map.values()].sort((a, b) => b.rx + b.tx - (a.rx + a.tx));
-}
-
 export function mergeFlows(current: FlowInfo[], incoming: FlowInfo[]): FlowInfo[] {
   const map = new Map<string, FlowInfo>();
   for (const f of current) map.set(`${f.device}:${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`, f);

@@ -125,7 +125,10 @@
 <style>
   .wrap {
     width: 100%;
-    height: 100%;
+    /* 面板是 flex 列容器且还包含标题行：用 flex:1 撑满剩余高度，
+       height:100% 会把标题高度也算进去导致图表溢出面板 */
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
   }

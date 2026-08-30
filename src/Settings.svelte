@@ -1,15 +1,71 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "./lib/tauri";
+  import type { PolicyStatus } from "./lib/tauri";
   import { selectDevice, state as appState } from "./lib/state.svelte";
 
   let devices: { name: string; display: string }[] = $state([]);
+  let policy = $state<PolicyStatus | null>(null);
+  let policyMsg = $state("");
+  let policyErr = $state(false);
+  let busy = $state(false);
+  let confirmMode = $state<string | null>(null);
 
   onMount(async () => {
     await state;
     const list = await api.listDevices();
     devices = list.map((d) => ({ name: d.name, display: d.desc ?? d.name }));
+    refreshPolicy();
   });
+
+  async function refreshPolicy(): Promise<void> {
+    policy = await api.ipv6PolicyStatus();
+  }
+
+  // 触发 UAC 弹窗以管理员身份重启：确认成功后当前进程会退出
+  async function restartAsAdmin(): Promise<void> {
+    busy = true;
+    policyErr = false;
+    policyMsg = "";
+    try {
+      await api.restartAsAdmin();
+      // 成功路径下后端已退出进程，通常不会走到这里
+    } catch (e) {
+      policyErr = true;
+      policyMsg = String(e);
+      busy = false;
+    }
+  }
+
+  async function applyPolicy(mode: string): Promise<void> {
+    // 未提权时：第一次点击提示，再次点击触发 UAC 提权重启
+    if (policy && !policy.elevated) {
+      if (confirmMode !== mode) {
+        confirmMode = mode;
+        return;
+      }
+      confirmMode = null;
+      await restartAsAdmin();
+      return;
+    }
+    // 仅 IPv6-only / IPv4-only 这类会断网的设置需要二次确认
+    if ((mode === "ipv6_only" || mode === "ipv4_only") && confirmMode !== mode) {
+      confirmMode = mode;
+      return;
+    }
+    confirmMode = null;
+    busy = true;
+    policyErr = false;
+    policyMsg = "";
+    try {
+      policyMsg = await api.setIpv6Policy(mode);
+    } catch (e) {
+      policyErr = true;
+      policyMsg = String(e);
+    }
+    busy = false;
+    refreshPolicy();
+  }
 </script>
 
 <div class="settings glass">
@@ -32,6 +88,64 @@
       </select>
     </div>
     <p class="hint">切换后立即以新范围重启抓包；IPv4/IPv6 区分依赖抓包引擎（Npcap）。</p>
+  </section>
+
+  <section class="group">
+    <div class="group-title">IP 协议策略</div>
+    {#if policy}
+      <div class="policy-status">
+        <div class="line">
+          前缀策略：::/0 优先级 {policy.v6Precedence} · IPv4(::ffff:0:0/96) 优先级 {policy.v4Precedence}
+          {#if policy.preferIpv6}<span class="badge v6">IPv6 优先</span>{:else}<span class="badge v4">非 IPv6 优先</span>{/if}
+          {#if !policy.elevated}
+          <span class="badge warn">未提升权限</span>
+          <button class="btn" disabled={busy} onclick={() => restartAsAdmin()}>以管理员身份重启（UAC）</button>
+        {/if}
+        </div>
+        <div class="line">
+          网卡绑定：
+          {#each policy.adapters as a (a.name)}
+            <span class="adp">{a.name} · v4 {a.ipv4 ? "启用" : "禁用"} · v6 {a.ipv6 ? "启用" : "禁用"}</span>
+          {:else}
+            <span class="adp">未读到活动物理网卡</span>
+          {/each}
+        </div>
+        {#if policy.error}<div class="line err">{policy.error}</div>{/if}
+      </div>
+    {/if}
+    <div class="policy-btns">
+      <button class="btn" disabled={busy} onclick={() => applyPolicy("prefer_ipv6")}>
+        {policy && !policy.elevated && confirmMode === "prefer_ipv6" ? "再次点击：UAC 提权重启后生效" : "IPv6 优先"}
+      </button>
+      <button class="btn" disabled={busy} onclick={() => applyPolicy("prefer_ipv4")}>
+        {policy && !policy.elevated && confirmMode === "prefer_ipv4" ? "再次点击：UAC 提权重启后生效" : "IPv4 优先"}
+      </button>
+      <button class="btn danger" disabled={busy} onclick={() => applyPolicy("ipv6_only")}>
+        {confirmMode === "ipv6_only"
+          ? policy && !policy.elevated ? "再次点击：UAC 提权重启后生效" : "再次点击确认（会禁用 IPv4）"
+          : "IPv6-only"}
+      </button>
+      <button class="btn danger" disabled={busy} onclick={() => applyPolicy("ipv4_only")}>
+        {confirmMode === "ipv4_only"
+          ? policy && !policy.elevated ? "再次点击：UAC 提权重启后生效" : "再次点击确认（会禁用 IPv6）"
+          : "IPv4-only"}
+      </button>
+      <button class="btn" disabled={busy} onclick={() => applyPolicy("restore_dual")}>
+        {policy && !policy.elevated && confirmMode === "restore_dual" ? "再次点击：UAC 提权重启后生效" : "恢复双栈"}
+      </button>
+    </div>
+    {#if policyMsg}<p class="hint" class:err={policyErr}>{policyMsg}</p>{/if}
+    <p class="hint">
+      IPv6 优先 / IPv4 优先：netsh 前缀策略调整（重启后保留），仅决定双栈目标的连接优先序；
+      IPv6-only / IPv4-only：禁用活动无线网卡的对应协议绑定，可能中断当前连接，需重新连接 Wi-Fi，
+      IPv4-only 网站在 IPv6-only 下将无法访问。
+      {#if policy && !policy.elevated}
+        当前未以管理员运行：点击策略按钮会先弹出 UAC 提权确认，确认后 GlassNet
+        将关闭并以管理员身份重新启动（取消 UAC 则保持现状）；也可以直接点击上方「以管理员身份重启」。
+      {:else}
+        修改需要管理员权限。
+      {/if}
+    </p>
   </section>
 
   <section class="group">
@@ -61,14 +175,11 @@
   .settings {
     position: relative;
     z-index: 1;
-    width: calc(100vw - 24px);
-    height: calc(100vh - 24px);
-    margin: 12px;
+    /* 作为主窗口内嵌视图：由 App.svelte 的主区域负责宽度与滚动 */
     padding: 16px 18px;
     display: flex;
     flex-direction: column;
     gap: 14px;
-    overflow: auto;
   }
   .head {
     display: flex;
@@ -118,6 +229,33 @@
     color: var(--text-tertiary);
     line-height: 1.6;
   }
+  .hint.err { color: #d70015; }
+  .policy-status {
+    font-size: var(--fs-sm);
+    line-height: 1.8;
+    margin-bottom: 8px;
+  }
+  .policy-status .line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .policy-status .line.err { color: #d70015; }
+  .adp {
+    display: inline-block;
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: 6px;
+    padding: 1px 8px;
+    font-size: var(--fs-xs);
+  }
+  .badge.warn { background: var(--orange); }
+  .policy-btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 8px 0;
+  }
+  .btn.danger {
+    color: #d70015;
+    border-color: rgba(215, 0, 21, 0.35);
+  }
+  .btn:disabled { opacity: 0.5; cursor: default; }
   .foot {
     margin-top: auto;
     font-size: var(--fs-xs);

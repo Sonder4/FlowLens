@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import {
     activeConnCount,
-    appTop,
     displaySamples,
     displaySpeed,
     filteredFlows,
@@ -17,8 +16,10 @@
   import HourlyBars from "./lib/components/HourlyBars.svelte";
   import LiveCurve from "./lib/components/LiveCurve.svelte";
   import ConnTable from "./lib/components/ConnTable.svelte";
+  import AppTrafficTable from "./lib/components/AppTrafficTable.svelte";
+  import Settings from "./Settings.svelte";
 
-  type View = "dash" | "inspect" | "history";
+  type View = "dash" | "inspect" | "history" | "settings";
   let collapsed = $state(false);
   let view: View = $state("dash");
   let devices: { name: string; display: string }[] = $state([]);
@@ -101,7 +102,7 @@
       <button class="nav-item" class:active={view === "history"} onclick={() => { view = "history"; refreshHourly(); }}>
         <span class="icon">◔</span>{#if !collapsed}<span class="label">历史记录</span>{/if}
       </button>
-      <button class="nav-item" onclick={() => api.showWindow("settings")}>
+      <button class="nav-item" class:active={view === "settings"} onclick={() => (view = "settings")}>
         <span class="icon">⚙</span>{#if !collapsed}<span class="label">设置</span>{/if}
       </button>
     </nav>
@@ -187,28 +188,14 @@
         </div>
       </section>
 
-      <!-- 应用流量 TOP -->
+      <!-- 应用流量（按进程 IPv4/IPv6 明细） -->
       <section class="apps">
         <div class="panel glass">
           <div class="panel-head">
-            <span class="panel-title">应用流量 TOP</span>
-            <span class="panel-sub">按累计 · 「连接详情」页可查看逐条流</span>
+            <span class="panel-title">应用流量（IPv4 / IPv6）</span>
+            <span class="panel-sub">按进程累计 · 「其他」可展开查看归属未识别的连接</span>
           </div>
-          <div class="apps-row">
-            {#each appTop().slice(0, 5) as a (a.program)}
-              <div class="app-card">
-                <div class="app-name" title={a.program}>{a.program}</div>
-                <div class="app-badges">
-                  {#if a.v4}<span class="badge v4">IPv4</span>{/if}
-                  {#if a.v6}<span class="badge v6">IPv6</span>{/if}
-                </div>
-                <div class="app-num num">▼ {fmtBytes(a.rx)}</div>
-                <div class="app-num num up">▲ {fmtBytes(a.tx)}</div>
-              </div>
-            {:else}
-              <div class="app-empty">暂无应用数据 — 抓包运行后按进程聚合显示</div>
-            {/each}
-          </div>
+          <AppTrafficTable flows={filteredFlows()} rows={6} />
         </div>
       </section>
 
@@ -217,9 +204,21 @@
         <ConnTable compact flows={filteredFlows()} rows={6} />
       </section>
     {:else if view === "inspect"}
-      <!-- 连接详情页 -->
-      <section class="history-panel glass">
-        <ConnTable flows={filteredFlows()} rows={20} />
+      <!-- 连接详情页：应用流量明细 + 逐条流 -->
+      <section class="stack">
+        <div class="panel glass">
+          <div class="panel-head">
+            <span class="panel-title">应用流量明细（IPv4 / IPv6）</span>
+            <span class="panel-sub">按进程累计 · 尊重当前网卡与 IPv4/IPv6 过滤</span>
+          </div>
+          <AppTrafficTable flows={filteredFlows()} rows={10} />
+        </div>
+        <ConnTable flows={filteredFlows()} rows={12} />
+      </section>
+    {:else if view === "settings"}
+      <!-- 设置页：内嵌主窗口，与其它侧边视图一致，不再弹出独立窗口 -->
+      <section class="settings-view">
+        <Settings />
       </section>
     {:else}
       <!-- 历史记录页 -->
@@ -239,7 +238,8 @@
     position: relative;
     z-index: 1;
     display: grid;
-    grid-template-columns: 220px 1fr;
+    /* 中间 auto 列为侧边栏占位：收起后侧栏变窄，主区域自动贴左，不产生空白 */
+    grid-template-columns: 220px auto 1fr;
     grid-template-rows: 52px 1fr;
     gap: 16px;
     padding: 16px;
@@ -247,13 +247,15 @@
   }
   .main {
     grid-row: 1 / 3;
-    display: grid;
-    grid-template-rows: 52px auto minmax(0, 1.25fr) auto minmax(0, 1fr);
+    /* 内容整体滚动（超出视口可上下滑动），侧边栏与顶栏保持固定 */
+    display: flex;
+    flex-direction: column;
     gap: 16px;
-    height: 100%;
+    overflow-y: auto;
     min-height: 0;
-    overflow: hidden;
   }
+  /* flex 子项默认会收缩挤压面板造成内容重叠，这里禁止收缩、按内容自然撑高 */
+  .main > * { flex-shrink: 0; }
 
   /* 侧边栏 */
   .sidebar {
@@ -424,11 +426,12 @@
   }
   .delta.up, .delta .up { color: var(--orange); }
 
-  /* 图表 */
+  /* 图表行：固定高度，图表在面板内按比例缩放，不撑破布局 */
   .charts {
     display: grid;
     grid-template-columns: 1.8fr 1fr;
     gap: 16px;
+    height: 240px;
     min-height: 0;
   }
   .panel {
@@ -449,37 +452,25 @@
   .conns { min-height: 0; }
 
   .apps { min-height: 0; }
-  .apps-row { display: flex; gap: 12px; overflow: hidden; }
-  .app-card {
-    flex: 1;
-    min-width: 0;
-    background: rgba(255, 255, 255, 0.5);
-    border: 1px solid var(--glass-edge);
-    border-radius: var(--radius-md);
-    padding: 10px 12px;
+
+  /* 连接详情页：上下两块面板，随整页滚动完整展示（子面板禁止收缩避免内容重叠） */
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 0;
   }
-  .app-name {
-    font-weight: 600;
-    font-size: var(--fs-md);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .app-badges { display: flex; gap: 4px; margin: 5px 0; }
-  .app-num { font-size: var(--fs-sm); color: var(--accent-v4); }
-  .app-num.up { color: var(--orange); }
-  .app-empty {
-    flex: 1;
-    text-align: center;
-    color: var(--text-tertiary);
-    padding: 14px 0;
-    font-size: var(--fs-sm);
+  .stack > * { flex-shrink: 0; }
+
+  .settings-view {
+    display: flex;
+    flex-direction: column;
   }
 
   .history-panel {
+    flex: 1 0 auto;
     padding: 18px;
     display: flex;
     flex-direction: column;
-    min-height: 0;
   }
 </style>

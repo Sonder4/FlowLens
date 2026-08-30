@@ -3,6 +3,7 @@
 
 mod adapter_io;
 mod capture;
+mod ip_policy;
 mod port_map;
 mod traffic_history;
 
@@ -40,6 +41,48 @@ fn stop_capture(app: AppHandle) {
 #[tauri::command]
 fn capture_running() -> bool {
     capture::is_running()
+}
+
+/// 当前 Windows IPv6 前缀策略与网卡协议绑定状态（设置页展示）
+#[tauri::command]
+fn ipv6_policy_status() -> ip_policy::PolicyStatus {
+    ip_policy::status()
+}
+
+/// 应用 IP 协议策略（需管理员权限，与 neu-ipv6-diagnostic.ps1 等价）
+#[tauri::command]
+fn set_ipv6_policy(mode: String) -> Result<String, String> {
+    ip_policy::apply(&mode)
+}
+
+/// 触发 UAC 弹窗并以管理员权限重启 GlassNet。
+/// 用户在 UAC 中确认后，当前未提权实例自动退出；取消则保留当前实例并返回错误。
+#[tauri::command]
+fn restart_as_admin() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {e}"))?;
+        let exe_escaped = exe.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "try {{ Start-Process -FilePath '{exe_escaped}' -Verb RunAs -ErrorAction Stop; exit 0 }} catch {{ exit 1 }}"
+        );
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let status = {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("powershell")
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status()
+                .map_err(|e| format!("无法发起提权请求: {e}"))?
+        };
+        if status.success() {
+            // 新的提权实例已启动，退出当前实例
+            std::process::exit(0);
+        }
+        return Err("已取消 UAC 提权或启动失败，GlassNet 未重启".into());
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("仅 Windows 支持 UAC 提权重启".into())
 }
 
 #[tauri::command]
@@ -144,6 +187,9 @@ pub fn run() {
             start_capture,
             stop_capture,
             capture_running,
+            ipv6_policy_status,
+            set_ipv6_policy,
+            restart_as_admin,
             io_snapshot,
             history,
             setup_done,

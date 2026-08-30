@@ -92,8 +92,6 @@ struct DeviceState {
     cur: [u64; 4], // rx_v4, rx_v6, tx_v4, tx_v6
     flows: HashMap<FlowKey, FlowStat>,
     cur_sec: u64,
-    /// round-robin cursor for re-resolving unknown program names
-    recheck: usize,
 }
 
 struct Running {
@@ -135,7 +133,6 @@ pub fn start(app: &AppHandle, device: Option<String>) {
             cur: [0; 4],
             flows: HashMap::new(),
             cur_sec: now_secs(),
-            recheck: 0,
         };
         let stop = Arc::clone(&stop_flag);
         let app = app.clone();
@@ -280,24 +277,20 @@ fn advance_second(app: &AppHandle, state: &mut DeviceState) {
     state.cur_sec = now_secs();
 
     // re-resolve program names for flows still marked unknown: the OS port
-    // table refreshes every 3s, so connections missed at creation may match now
+    // table refreshes every 3s, so connections missed at creation may match
+    // now; retry every unknown flow once per second
     let keys: Vec<FlowKey> = state
         .flows
         .iter()
         .filter(|(_, s)| s.program == "其他")
         .map(|(k, _)| *k)
         .collect();
-    if !keys.is_empty() {
-        for i in 0..8.min(keys.len()) {
-            let k = keys[(state.recheck + i) % keys.len()];
-            if let Some(name) = port_map::program_for(k.is_tcp, k.remote.is_ipv4(), k.local_port)
-            {
-                if let Some(st) = state.flows.get_mut(&k) {
-                    st.program = name;
-                }
+    for k in keys {
+        if let Some(name) = port_map::program_for(k.is_tcp, k.remote.is_ipv4(), k.local_port) {
+            if let Some(st) = state.flows.get_mut(&k) {
+                st.program = name;
             }
         }
-        state.recheck = (state.recheck + 8) % keys.len().max(1);
     }
     let [rx_v4, rx_v6, tx_v4, tx_v6] = state.cur;
     state.cur = [0; 4];

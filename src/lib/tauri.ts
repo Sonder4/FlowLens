@@ -46,6 +46,21 @@ export interface DeviceTick {
   flows: FlowInfo[];
 }
 
+export interface AdapterBinding {
+  name: string;
+  ipv4: boolean;
+  ipv6: boolean;
+}
+
+export interface PolicyStatus {
+  v6Precedence: number;
+  v4Precedence: number;
+  preferIpv6: boolean;
+  adapters: AdapterBinding[];
+  elevated: boolean;
+  error: string | null;
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(cmd, args);
@@ -65,6 +80,9 @@ export const api = {
   localAddresses: () => invoke<string[]>("local_addresses"),
   showWindow: (label: string) => invoke<void>("show_window", { label }),
   hideWindow: (label: string) => invoke<void>("hide_window", { label }),
+  ipv6PolicyStatus: () => invoke<PolicyStatus>("ipv6_policy_status"),
+  setIpv6Policy: (mode: string) => invoke<string>("set_ipv6_policy", { mode }),
+  restartAsAdmin: () => invoke<void>("restart_as_admin"),
 };
 
 export async function listen<T>(

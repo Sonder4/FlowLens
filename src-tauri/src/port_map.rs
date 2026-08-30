@@ -20,11 +20,14 @@ pub struct PortKey {
 struct Cache {
     ports: HashMap<PortKey, u32>,
     names: HashMap<u32, String>,
+    /// pid -> 承载的 Windows 服务名（把 svchost.exe 归属到具体服务）
+    services: HashMap<u32, String>,
 }
 
 static CACHE: RwLock<Option<Arc<Cache>>> = RwLock::new(None);
 
 /// Returns the process name owning the given local port, if known.
+/// Shared svchost.exe processes are reported as `svchost:服务名[,服务名…]`.
 pub fn program_for(is_tcp: bool, is_v4: bool, local_port: u16) -> Option<String> {
     let cache = CACHE
         .read()
@@ -35,7 +38,13 @@ pub fn program_for(is_tcp: bool, is_v4: bool, local_port: u16) -> Option<String>
         is_v4,
         port: local_port,
     })?;
-    cache.names.get(&pid).cloned()
+    let name = cache.names.get(&pid)?;
+    if name.eq_ignore_ascii_case("svchost.exe") {
+        if let Some(svc) = cache.services.get(&pid) {
+            return Some(format!("svchost:{}", svc));
+        }
+    }
+    Some(name.clone())
 }
 
 /// Spawns the background refresher thread.
@@ -77,7 +86,88 @@ fn refresh_once() -> Cache {
         })
         .collect();
 
-    Cache { ports, names }
+    let services = collect_services();
+
+    Cache {
+        ports,
+        names,
+        services,
+    }
+}
+
+/// Enumerates Win32 services and maps each hosting PID to its service names,
+/// so traffic inside a shared svchost.exe can be attributed to the actual
+/// service (e.g. Dnscache / WSearch) instead of a bare "svchost.exe".
+#[cfg(windows)]
+fn collect_services() -> HashMap<u32, String> {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, EnumServicesStatusExW, OpenSCManagerW,
+        ENUM_SERVICE_STATUS_PROCESSW, SC_ENUM_PROCESS_INFO, SC_MANAGER_ENUMERATE_SERVICE,
+        SERVICE_STATE_ALL, SERVICE_WIN32,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    let mut map: HashMap<u32, Vec<String>> = HashMap::new();
+    unsafe {
+        let Ok(scm) = OpenSCManagerW(None, None, SC_MANAGER_ENUMERATE_SERVICE) else {
+            return HashMap::new();
+        };
+        let mut needed = 0u32;
+        let mut returned = 0u32;
+        let mut resume = 0u32;
+        // 首次调用故意用空缓冲：只为取得所需字节数（以 ERROR_MORE_DATA 失败）
+        let _ = EnumServicesStatusExW(
+            scm,
+            SC_ENUM_PROCESS_INFO,
+            SERVICE_WIN32,
+            SERVICE_STATE_ALL,
+            None,
+            &mut needed,
+            &mut returned,
+            Some(&mut resume),
+            PCWSTR::null(),
+        );
+        if needed > 0 {
+            let mut buf = vec![0u8; needed as usize];
+            if EnumServicesStatusExW(
+                scm,
+                SC_ENUM_PROCESS_INFO,
+                SERVICE_WIN32,
+                SERVICE_STATE_ALL,
+                Some(buf.as_mut_slice()),
+                &mut needed,
+                &mut returned,
+                Some(&mut resume),
+                PCWSTR::null(),
+            )
+            .is_ok()
+            {
+                let stride = std::mem::size_of::<ENUM_SERVICE_STATUS_PROCESSW>();
+                for i in 0..returned as usize {
+                    let entry =
+                        &*(buf.as_ptr().add(i * stride) as *const ENUM_SERVICE_STATUS_PROCESSW);
+                    let pid = entry.ServiceStatusProcess.dwProcessId;
+                    if pid == 0 || entry.lpServiceName.is_null() {
+                        continue;
+                    }
+                    if let Ok(name) = PWSTR(entry.lpServiceName.as_ptr()).to_string() {
+                        map.entry(pid).or_default().push(name);
+                    }
+                }
+            }
+        }
+        let _ = CloseServiceHandle(scm);
+    }
+    map.into_iter()
+        .map(|(pid, mut names)| {
+            names.dedup();
+            let mut s = names.join(",");
+            if s.chars().count() > 48 {
+                s = format!("{}…", s.chars().take(47).collect::<String>());
+            }
+            (pid, s)
+        })
+        .collect()
 }
 
 /// Reads the DWORD-stored port (network byte order in the high half).
