@@ -31,7 +31,9 @@
     return Math.ceil(raw / mag) * mag;
   });
 
-  const yTicks = $derived([0, 0.25, 0.5, 0.75, 1].map((f) => f * niceMax));
+  const yTicks = $derived(
+    [0, 0.25, 0.5, 0.75, 1].map((f) => f * niceMax).filter((v) => Number.isFinite(v)),
+  );
 
   const bars = $derived.by(() => {
     const n = Math.max(1, data.length);
