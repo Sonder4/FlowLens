@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { api } from "./lib/tauri";
   import type { PolicyStatus } from "./lib/tauri";
-  import { selectDevice, state as appState } from "./lib/state.svelte";
+  import { initState, selectDevice, state as appState } from "./lib/state.svelte";
 
   let devices: { name: string; display: string }[] = $state([]);
   let policy = $state<PolicyStatus | null>(null);
@@ -12,7 +12,8 @@
   let confirmMode = $state<string | null>(null);
 
   onMount(async () => {
-    await state;
+    // 等待后端 setup 完成（initState 幂等，主视图已调用过则直接返回）
+    await initState();
     const list = await api.listDevices();
     devices = list.map((d) => ({ name: d.name, display: d.desc ?? d.name }));
     refreshPolicy();
