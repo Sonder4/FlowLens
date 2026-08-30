@@ -14,10 +14,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 
-use super::types::{BucketAgg, BucketKey, Dir, Family, Granularity, HistBucket};
+use super::types::{
+    AppDayAgg, AppDayKey, AppDayRow,
+    BucketAgg, BucketKey, Dir, Family, Granularity, HistBucket,
+};
 
 /// Minute-level details are kept for this many days; day/month rollups are kept forever.
 const RETENTION_MINUTE_DAYS: i64 = 90;
+
+/// 应用每日流量入库门槛：单日（v4+v6、收+发）合计超过 1 GB 才持久化。
+/// 低于门槛的行在每次落盘时清理（含跨天的历史残留），显著压缩数据库体积。
+pub const APP_DAY_THRESHOLD_BYTES: u64 = 1_000_000_000;
 
 /// Flush cadence of the background flusher thread, in seconds.
 pub const FLUSH_INTERVAL_SECS: u64 = 60;
@@ -25,6 +32,7 @@ pub const FLUSH_INTERVAL_SECS: u64 = 60;
 pub struct HistoryStore {
     conn: Mutex<Connection>,
     live: Mutex<HashMap<BucketKey, BucketAgg>>,
+    app_live: Mutex<HashMap<AppDayKey, AppDayAgg>>,
 }
 
 impl HistoryStore {
@@ -51,6 +59,7 @@ impl HistoryStore {
         Ok(Self {
             conn: Mutex::new(conn),
             live: Mutex::new(HashMap::new()),
+            app_live: Mutex::new(HashMap::new()),
         })
     }
 
@@ -88,6 +97,14 @@ impl HistoryStore {
                 name       TEXT PRIMARY KEY,
                 desc       TEXT,
                 first_seen INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS traffic_app_day (
+                day      TEXT NOT NULL,
+                app      TEXT NOT NULL,
+                family   TEXT NOT NULL,
+                rx_bytes INTEGER NOT NULL,
+                tx_bytes INTEGER NOT NULL,
+                PRIMARY KEY (day, app, family)
             );",
         )
     }
@@ -105,6 +122,27 @@ impl HistoryStore {
             agg.bytes += bytes;
             agg.pkts += 1;
         }).or_insert(BucketAgg { bytes, pkts: 1 });
+    }
+
+    /// 记录一个包的应用流量（按进程），累计进当日内存桶，随 flush 落盘。
+    /// 未识别归属的连接暂记为「其他」，端口表刷新后新流量会归属到正确进程。
+    pub fn record_app(&self, app: &str, family: Family, dir: Dir, bytes: u64) {
+        let key = AppDayKey {
+            day: local_day(),
+            app: app.to_string(),
+            family,
+        };
+        let mut live = self.app_live.lock().expect("app live buckets lock poisoned");
+        live.entry(key).and_modify(|agg| {
+            if dir == Dir::Rx {
+                agg.rx += bytes;
+            } else {
+                agg.tx += bytes;
+            }
+        }).or_insert(AppDayAgg {
+            rx: if dir == Dir::Rx { bytes } else { 0 },
+            tx: if dir == Dir::Tx { bytes } else { 0 },
+        });
     }
 
     /// Drains the live buckets into the database and refreshes rollups and retention.
@@ -164,7 +202,51 @@ impl HistoryStore {
             "DELETE FROM traffic_minute WHERE ts < ?1",
             rusqlite::params![now_secs() - RETENTION_MINUTE_DAYS * 86400],
         )?;
-        tx.commit()
+        tx.commit()?;
+
+        // 应用每日流量：增量 upsert 后只清理「过去日期」中未达 1GB 门槛的行。
+        // 当天的行保留增量累计（跨 flush、跨重启都能加总），日界后第一次
+        // flush 时统一判定：不达标整组删除，达标永久保留。
+        let drained_apps: HashMap<AppDayKey, AppDayAgg> = std::mem::take(
+            &mut *self.app_live.lock().expect("app live buckets lock poisoned"),
+        );
+        if !drained_apps.is_empty() {
+            let today = local_day();
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO traffic_app_day (day, app, family, rx_bytes, tx_bytes)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(day, app, family) DO UPDATE
+                     SET rx_bytes = rx_bytes + excluded.rx_bytes,
+                         tx_bytes = tx_bytes + excluded.tx_bytes",
+                )?;
+                for (key, agg) in &drained_apps {
+                    stmt.execute(rusqlite::params![
+                        key.day,
+                        key.app,
+                        key.family.label(),
+                        i64::try_from(agg.rx).unwrap_or(i64::MAX),
+                        i64::try_from(agg.tx).unwrap_or(i64::MAX),
+                    ])?;
+                }
+            }
+            tx.execute(
+                "DELETE FROM traffic_app_day
+                 WHERE day < ?1
+                   AND (day, app) IN (
+                       SELECT day, app FROM traffic_app_day
+                       GROUP BY day, app
+                       HAVING SUM(rx_bytes + tx_bytes) < ?2
+                   )",
+                rusqlite::params![
+                    today,
+                    i64::try_from(APP_DAY_THRESHOLD_BYTES).unwrap_or(i64::MAX)
+                ],
+            )?;
+            tx.commit()?;
+        }
+        Ok(())
     }
 
     /// Runs an aggregated query, returning pivoted buckets ready for charting.
@@ -235,6 +317,79 @@ impl HistoryStore {
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
     }
+
+    /// 查询应用每日流量历史（按 本地日期 × 进程 汇总 v4/v6 收发）。
+    /// 已入库的行都满足 >1GB 门槛；尚未落盘的内存桶合并进来后按门槛过滤，
+    /// 保证刚产生的重流量应用立即可见。
+    pub fn query_app_days(&self) -> Result<Vec<AppDayRow>, rusqlite::Error> {
+        // (day, app) -> row；BTreeMap 保持日期有序
+        let mut map: std::collections::BTreeMap<(String, String), AppDayRow> =
+            std::collections::BTreeMap::new();
+        {
+            let conn = self.conn.lock().expect("db lock poisoned");
+            let mut stmt = conn.prepare(
+                "SELECT day, app,
+                    COALESCE(SUM(CASE WHEN family = 'v4' THEN rx_bytes END), 0),
+                    COALESCE(SUM(CASE WHEN family = 'v4' THEN tx_bytes END), 0),
+                    COALESCE(SUM(CASE WHEN family = 'v6' THEN rx_bytes END), 0),
+                    COALESCE(SUM(CASE WHEN family = 'v6' THEN tx_bytes END), 0)
+                 FROM traffic_app_day
+                 GROUP BY day, app",
+            )?;
+            let read = |v: rusqlite::Result<i64, rusqlite::Error>| -> u64 {
+                v.map(|n| u64::try_from(n).unwrap_or_default()).unwrap_or_default()
+            };
+            let rows = stmt.query_map([], |row| {
+                let day: String = row.get(0)?;
+                let app: String = row.get(1)?;
+                Ok(AppDayRow {
+                    rx_v4: read(row.get(2)),
+                    tx_v4: read(row.get(3)),
+                    rx_v6: read(row.get(4)),
+                    tx_v6: read(row.get(5)),
+                    day: day.clone(),
+                    app,
+                })
+            })?;
+            for r in rows {
+                let r = r?;
+                map.insert((r.day.clone(), r.app.clone()), r);
+            }
+        }
+        // 合并尚未落盘的内存累计
+        let live = self.app_live.lock().expect("app live buckets lock poisoned");
+        for (key, agg) in live.iter() {
+            let e = map
+                .entry((key.day.clone(), key.app.clone()))
+                .or_insert_with(|| AppDayRow {
+                    day: key.day.clone(),
+                    app: key.app.clone(),
+                    rx_v4: 0,
+                    tx_v4: 0,
+                    rx_v6: 0,
+                    tx_v6: 0,
+                });
+            let (rx, tx) = match key.family {
+                Family::V4 => (&mut e.rx_v4, &mut e.tx_v4),
+                Family::V6 => (&mut e.rx_v6, &mut e.tx_v6),
+            };
+            *rx += agg.rx;
+            *tx += agg.tx;
+        }
+        drop(live);
+        // 门槛过滤：合并后合计不足 1GB 的应用不展示
+        let mut rows: Vec<AppDayRow> = map
+            .into_values()
+            .filter(|r| r.rx_v4 + r.tx_v4 + r.rx_v6 + r.tx_v6 >= APP_DAY_THRESHOLD_BYTES)
+            .collect();
+        // 最近日期在前；同一天内按合计流量降序
+        rows.sort_by(|a, b| {
+            b.day.cmp(&a.day)
+                .then((b.rx_v4 + b.tx_v4 + b.rx_v6 + b.tx_v6)
+                    .cmp(&(a.rx_v4 + a.tx_v4 + a.rx_v6 + a.tx_v6)))
+        });
+        Ok(rows)
+    }
 }
 
 fn now_secs() -> i64 {
@@ -245,6 +400,11 @@ fn now_secs() -> i64 {
 
 fn now_minute() -> i64 {
     now_secs() / 60
+}
+
+/// 当前本地日期，`YYYY-MM-DD`（应用每日流量的键）
+fn local_day() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 static STORE: OnceLock<HistoryStore> = OnceLock::new();
@@ -326,6 +486,30 @@ pub fn query(granularity: Granularity, adapter: Option<&str>) -> Vec<HistBucket>
         .get()
         .and_then(|store| store.query(granularity, adapter).ok())
         .unwrap_or_default()
+}
+
+/// Records per-app packet bytes into the global store; silent no-op before `init`.
+pub fn record_app(app: &str, family: Family, dir: Dir, bytes: u64) {
+    if let Some(store) = STORE.get() {
+        store.record_app(app, family, dir, bytes);
+    }
+}
+
+/// Queries per-app daily traffic history; silent no-op (empty result) before `init`.
+pub fn query_app_days() -> Vec<AppDayRow> {
+    STORE
+        .get()
+        .and_then(|store| store.query_app_days().ok())
+        .unwrap_or_default()
+}
+
+/// 立即落盘（应用退出时调用，避免丢失最近一个 flush 周期的数据）。
+pub fn flush_now() {
+    if let Some(store) = STORE.get() {
+        if let Err(e) = store.flush() {
+            eprintln!("Sniffnet error: traffic history flush on exit failed: {e}");
+        }
+    }
 }
 
 
@@ -417,6 +601,55 @@ mod tests {
 
         let daily = store.query(Granularity::Daily, None).expect("daily");
         assert_eq!(daily[0].rx_v4, 200);
+    }
+
+    #[test]
+    fn test_app_daily_accumulates_across_flushes_and_filters_threshold() {
+        let store = store();
+        // 第一段 600MB：未达 1GB，查询不可见（行保留在库中等待次日判定）
+        store.record_app("heavy.exe", Family::V4, Dir::Rx, 600_000_000);
+        store.flush().expect("flush 1");
+        assert!(store.query_app_days().expect("q").is_empty());
+
+        // 第二段 600MB：增量加总 1.2GB 超过门槛，v4/v6 明细正确
+        store.record_app("heavy.exe", Family::V4, Dir::Rx, 600_000_000);
+        store.record_app("heavy.exe", Family::V6, Dir::Tx, 50);
+        store.flush().expect("flush 2");
+        let rows = store.query_app_days().expect("q 2");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].app, "heavy.exe");
+        assert_eq!(rows[0].rx_v4, 1_200_000_000);
+        assert_eq!(rows[0].tx_v6, 50);
+
+        // 低流量应用（999MB）当天同样不展示
+        store.record_app("small.exe", Family::V4, Dir::Tx, 999_999_999);
+        store.flush().expect("flush 3");
+        let rows = store.query_app_days().expect("q 3");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].app, "heavy.exe");
+    }
+
+    #[test]
+    fn test_app_daily_prunes_stale_subthreshold_rows() {
+        let store = store();
+        // 注入历史残留：昨日低于门槛的行应被清理，达标的保留
+        store
+            .conn
+            .lock()
+            .expect("db")
+            .execute_batch(
+                "INSERT INTO traffic_app_day VALUES ('2000-01-01','old.exe','v4',100,0);
+                 INSERT INTO traffic_app_day VALUES ('2000-01-01','big.exe','v4',2000000000,0);",
+            )
+            .expect("seed");
+        store.record_app("heavy.exe", Family::V4, Dir::Rx, 1_500_000_000);
+        store.flush().expect("flush");
+
+        let rows = store.query_app_days().expect("q");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|r| r.app == "big.exe" && r.day == "2000-01-01"));
+        assert!(rows.iter().any(|r| r.app == "heavy.exe" && r.rx_v4 == 1_500_000_000));
+        assert!(!rows.iter().any(|r| r.app == "old.exe"));
     }
 
 }

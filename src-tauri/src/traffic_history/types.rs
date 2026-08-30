@@ -62,6 +62,35 @@ pub struct BucketKey {
     pub minute: i64,
 }
 
+/// 应用每日流量的内存累计键：本地日期 + 进程名 + IP 族。
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct AppDayKey {
+    /// 本地日期，`YYYY-MM-DD`
+    pub day: String,
+    pub app: String,
+    pub family: Family,
+}
+
+/// 应用每日流量的收/发累计（字节数）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AppDayAgg {
+    pub rx: u64,
+    pub tx: u64,
+}
+
+/// 历史查询返回的一条应用每日流量记录（仅入库超过阈值的重流量应用）。
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDayRow {
+    /// 本地日期，`YYYY-MM-DD`
+    pub day: String,
+    pub app: String,
+    pub rx_v4: u64,
+    pub tx_v4: u64,
+    pub rx_v6: u64,
+    pub tx_v6: u64,
+}
+
 /// Accumulated counters of a single bucket.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BucketAgg {
@@ -105,9 +134,27 @@ pub struct HistBucket {
 }
 
 #[cfg(test)]
+impl HistBucket {
+    pub(crate) fn total(&self) -> u64 {
+        self.rx_v4 + self.rx_v6 + self.tx_v4 + self.tx_v6
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use etherparse::{Ipv4Extensions, Ipv4Header, NetHeaders};
+
+    // 供旧断言使用的辅助方法（仅测试编译）
+    impl Family {
+        fn from_net_headers(net: &Option<NetHeaders>) -> Option<Self> {
+            match net {
+                Some(NetHeaders::Ipv4(..)) => Some(Self::V4),
+                Some(NetHeaders::Ipv6(..)) => Some(Self::V6),
+                _ => None,
+            }
+        }
+    }
 
     #[test]
     fn test_family_from_net_headers() {

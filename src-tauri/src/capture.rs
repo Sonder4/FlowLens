@@ -254,6 +254,8 @@ fn run_device(app: AppHandle, pcap_name: String, mut state: DeviceState, stop: A
                     entry.tx += bytes;
                 }
                 entry.last_seen = seen;
+                // 按进程累计每日流量（内存桶，60s 落盘；未识别暂记「其他」）
+                traffic_history::record_app(&entry.program, family, dir, bytes);
                 if state.flows.len() > 256 {
                     if let Some(oldest) = state
                         .flows

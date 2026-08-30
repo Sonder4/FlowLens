@@ -76,13 +76,20 @@ fn restart_as_admin() -> Result<(), String> {
                 .map_err(|e| format!("无法发起提权请求: {e}"))?
         };
         if status.success() {
-            // 新的提权实例已启动，退出当前实例
+            // 新的提权实例已启动；先落盘再退出当前实例
+            traffic_history::flush_now();
             std::process::exit(0);
         }
         return Err("已取消 UAC 提权或启动失败，GlassNet 未重启".into());
     }
     #[cfg(not(target_os = "windows"))]
     Err("仅 Windows 支持 UAC 提权重启".into())
+}
+
+/// 应用每日流量历史（仅保留单日合计 > 1GB 的应用，v4/v6 收发明细）
+#[tauri::command]
+fn history_app_day() -> Vec<traffic_history::AppDayRow> {
+    traffic_history::query_app_days()
 }
 
 #[tauri::command]
@@ -192,6 +199,7 @@ pub fn run() {
             restart_as_admin,
             io_snapshot,
             history,
+            history_app_day,
             setup_done,
             local_addresses,
             popup_floating_menu,
@@ -212,6 +220,12 @@ pub fn run() {
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("error while running GlassNet");
+        .build(tauri::generate_context!())
+        .expect("error while building GlassNet")
+        .run(|_app, event| {
+            // 退出前把内存中未落盘的流量（含应用每日累计）写入数据库
+            if matches!(event, tauri::RunEvent::Exit) {
+                traffic_history::flush_now();
+            }
+        });
 }

@@ -4,5 +4,5 @@
 pub mod store;
 pub mod types;
 
-pub use store::{init, query, record};
-pub use types::{Dir, Family, Granularity, HistBucket};
+pub use store::{flush_now, init, query, query_app_days, record, record_app};
+pub use types::{AppDayRow, Dir, Family, Granularity, HistBucket};

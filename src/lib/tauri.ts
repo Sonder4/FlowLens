@@ -15,6 +15,16 @@ export interface HistBucket {
   txV6: number;
 }
 
+// 应用每日流量历史行（仅入库单日合计 > 1GB 的应用）
+export interface AppDayRow {
+  day: string;
+  app: string;
+  rxV4: number;
+  txV4: number;
+  rxV6: number;
+  txV6: number;
+}
+
 export interface AdapterIo {
   name: string;
   rxSpeed: number;
@@ -75,6 +85,7 @@ export const api = {
   ioSnapshot: () => invoke<AdapterIo[]>("io_snapshot"),
   history: (granularity: string, adapter: string | null) =>
     invoke<HistBucket[]>("history", { granularity, adapter }),
+  historyAppDay: () => invoke<AppDayRow[]>("history_app_day"),
   knownAdapters: () => invoke<[string, string | null][]>("known_adapters"),
   popupFloatingMenu: () => invoke<void>("popup_floating_menu"),
   localAddresses: () => invoke<string[]>("local_addresses"),

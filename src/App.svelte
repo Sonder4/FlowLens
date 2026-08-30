@@ -17,6 +17,7 @@
   import LiveCurve from "./lib/components/LiveCurve.svelte";
   import ConnTable from "./lib/components/ConnTable.svelte";
   import AppTrafficTable from "./lib/components/AppTrafficTable.svelte";
+  import AppDailyHistory from "./lib/components/AppDailyHistory.svelte";
   import Settings from "./Settings.svelte";
 
   type View = "dash" | "inspect" | "history" | "settings";
@@ -228,6 +229,14 @@
           <span class="panel-sub num">总计 {fmtBytes(v6Share().total)}</span>
         </div>
         <HourlyBars data={appState.hourly} />
+      </section>
+      <!-- 应用每日流量历史（SQLite 持久化，重启后可查） -->
+      <section class="history-panel glass">
+        <div class="panel-head">
+          <span class="panel-title">应用每日流量（当日合计 &gt; 1 GB）</span>
+          <span class="panel-sub">本地数据库持久化 · IPv4 / IPv6 分列</span>
+        </div>
+        <AppDailyHistory />
       </section>
     {/if}
   </div>
