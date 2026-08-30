@@ -2,7 +2,7 @@
 // 数据来源：后端事件（traffic-tick / io-tick / capture-state）+ 命令查询
 
 import { api, listen } from "./tauri";
-import type { AdapterIo, ConnInfo, DeviceInfo, DeviceTick, HistBucket } from "./tauri";
+import type { AdapterIo, DeviceInfo, DeviceTick, FlowInfo, HistBucket } from "./tauri";
 
 export const SPEED_SAMPLES = 90;
 
@@ -18,9 +18,11 @@ export const state = $state({
   sessionTx: 0,
   // 24 小时历史（v4/v6 × rx/tx）
   hourly: [] as HistBucket[],
-  // 连接面板（各设备合并，按累计排序）
-  conns: [] as ConnInfo[],
+  // 流表（各设备合并，按累计排序）
+  flows: [] as FlowInfo[],
   familyFilter: null as "v4" | "v6" | null,
+  events: [] as { ts: number; text: string }[],
+  unread: 0,
   errorMsg: null as string | null,
 });
 
@@ -48,26 +50,74 @@ export function v6Share() {
 export function activeConnCount() {
   let v4 = 0;
   let v6 = 0;
-  for (const c of state.conns) {
+  for (const c of state.flows) {
     if (c.family === "v4") v4 += 1;
     else v6 += 1;
   }
   return { total: v4 + v6, v4, v6 };
 }
 
-export function filteredConns() {
+export function filteredFlows() {
   return state.familyFilter
-    ? state.conns.filter((c) => c.family === state.familyFilter)
-    : state.conns;
+    ? state.flows.filter((f) => f.family === state.familyFilter)
+    : state.flows;
+}
+
+/// 按进程/应用聚合（主页 TOP 卡片与检查页数据源）
+export function appTop() {
+  const map = new Map<string, { program: string; rx: number; tx: number; v4: boolean; v6: boolean }>();
+  for (const f of state.flows) {
+    const key = f.program;
+    const e = map.get(key) ?? { program: key, rx: 0, tx: 0, v4: false, v6: false };
+    e.rx += f.rx;
+    e.tx += f.tx;
+    if (f.family === "v4") e.v4 = true;
+    else e.v6 = true;
+    map.set(key, e);
+  }
+  return [...map.values()].sort((a, b) => b.rx + b.tx - (a.rx + a.tx));
+}
+
+export function mergeFlows(current: FlowInfo[], incoming: FlowInfo[]): FlowInfo[] {
+  const map = new Map<string, FlowInfo>();
+  for (const f of current) map.set(`${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`, f);
+  for (const f of incoming) {
+    const key = `${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`;
+    const old = map.get(key);
+    if (old) {
+      map.set(key, { ...f, rx: Math.max(old.rx, f.rx), tx: Math.max(old.tx, f.tx) });
+    } else {
+      map.set(key, f);
+      const app = f.program === "其他" ? "未知应用" : f.program;
+      state.events.unshift({
+        ts: Date.now(),
+        text: `${app} 新建${f.family === "v4" ? " IPv4" : " IPv6"} ${f.proto} 连接 → ${f.remote}`,
+      });
+      if (state.events.length > 50) state.events.pop();
+      state.unread += 1;
+    }
+  }
+  return [...map.values()].sort((a, b) => b.rx + b.tx - (a.rx + a.tx)).slice(0, 24);
 }
 
 let loaded = false;
+
+const sleepMs = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
 
 export async function initState(): Promise<void> {
   if (loaded) return;
   loaded = true;
 
+  // 后端 setup（历史库/捕获引擎）在窗口加载后才完成：等待其就绪再查询，
+  // 否则查询会拿到空数据且错过 capture-state 事件
+  for (let i = 0; i < 50; i++) {
+    if (await api.setupDone()) break;
+    await sleepMs(200);
+  }
+
   state.running = await api.captureRunning();
+  liveHour = { label: currentHourLabel(), rxV4: 0, rxV6: 0, txV4: 0, txV6: 0 };
   state.io = await api.ioSnapshot();
   state.hourly = await api.history("hourly", null);
 
@@ -96,52 +146,37 @@ function onTickAccumulate(tick: DeviceTick): void {
     if (state.speedSamples.length > SPEED_SAMPLES) {
       state.speedSamples.shift();
     }
-    state.conns = mergeConns(state.conns, tick.conns, tick.device);
+    state.flows = mergeFlows(state.flows, tick.flows);
   }
 }
 
-function mergeConns(
-  current: ConnInfo[],
-  incoming: ConnInfo[],
-  _device: string,
-): ConnInfo[] {
-  const map = new Map<string, ConnInfo>();
-  for (const c of current) map.set(c.remote, c);
-  for (const c of incoming) {
-    const old = map.get(c.remote);
-    if (old) {
-      // 取较大者：不同设备出现的同一远端视为同一连接
-      map.set(c.remote, {
-        ...c,
-        rx: Math.max(old.rx, c.rx),
-        tx: Math.max(old.tx, c.tx),
-      });
-    } else {
-      map.set(c.remote, c);
-    }
-  }
-  return [...map.values()].sort((a, b) => b.rx + b.tx - (a.rx + a.tx)).slice(0, 12);
-}
+// 当前小时以内存为准：后端每 60s 才落盘一次，定时刷新会用旧数据覆盖当前桶
+let liveHour = { label: "", rxV4: 0, rxV6: 0, txV4: 0, txV6: 0 };
 
 function onTrafficTick(tick: DeviceTick): void {
   onTickAccumulate(tick);
 
-  // 更新当前小时的内存柱（24h 图的最后一根随实时数据增长）
+  const relevant = !state.activeDevice || tick.device === state.activeDevice;
+  if (!relevant) return;
+
   const label = currentHourLabel();
-  const last = state.hourly.at(-1);
-  const fresh = last?.label === label;
-  const bucket = fresh
-    ? (state.hourly[state.hourly.length - 1] = { ...last })
-    : {
-        label,
-        rxV4: 0,
-        rxV6: 0,
-        txV4: 0,
-        txV6: 0,
-      };
-  if (!fresh) {
-    state.hourly.push(bucket);
+  if (liveHour.label !== label) {
+    liveHour = { label, rxV4: 0, rxV6: 0, txV4: 0, txV6: 0 };
+    state.hourly = state.hourly.filter((b) => b.label !== label);
+    state.hourly.push({ ...liveHour });
     if (state.hourly.length > 24) state.hourly.shift();
+  }
+  liveHour.rxV4 += tick.rxV4;
+  liveHour.rxV6 += tick.rxV6;
+  liveHour.txV4 += tick.txV4;
+  liveHour.txV6 += tick.txV6;
+  // 直接改数组元素的响应式字段，确保图表柱随实时数据增长
+  const last = state.hourly.at(-1);
+  if (last && last.label === label) {
+    last.rxV4 = liveHour.rxV4;
+    last.rxV6 = liveHour.rxV6;
+    last.txV4 = liveHour.txV4;
+    last.txV6 = liveHour.txV6;
   }
 }
 
@@ -160,14 +195,15 @@ export async function selectDevice(device: string | null): Promise<void> {
   state.sessionRx = 0;
   state.sessionTx = 0;
   state.speedSamples.length = 0;
-  state.conns = [];
+  state.flows = [];
   await api.startCapture(device);
 }
 
 export async function refreshHourly(): Promise<void> {
   const raw = await api.history("hourly", null);
-  if (raw.length === 0 || raw.some((b) => !b || typeof b.rxV4 !== "number")) {
-    console.error("hourly payload: " + JSON.stringify(raw).slice(0, 300));
-  }
-  state.hourly = raw;
+  // 当前小时用内存实时桶（后端 60s 落盘，DB 里当前小时不完整）
+  const merged = [...raw.filter((b) => b.label !== liveHour.label)];
+  merged.push({ ...liveHour });
+  if (merged.length > 24) merged.shift();
+  state.hourly = merged;
 }

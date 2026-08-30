@@ -4,6 +4,8 @@
       activeConnCount,
       initState,
     refreshHourly,
+    appTop,
+    filteredFlows,
     selectDevice,
     state as appState,
     totalSpeed,
@@ -14,7 +16,8 @@
   import LiveCurve from "./lib/components/LiveCurve.svelte";
   import ConnTable from "./lib/components/ConnTable.svelte";
 
-  type View = "dash" | "history";
+  type View = "dash" | "inspect" | "notifications" | "history";
+  let collapsed = $state(false);
   let view: View = $state("dash");
   let devices: { name: string; display: string }[] = $state([]);
 
@@ -45,7 +48,8 @@
       await api.stopCapture();
       appState.running = false;
     } else {
-      await api.startCapture(appState.activeDevice);
+      // 引擎始终捕获全部有地址网卡；网卡分段仅做前端显示过滤（切换零延迟）
+      await api.startCapture(null);
       appState.running = true;
     }
   }
@@ -69,39 +73,43 @@
   });
 </script>
 
-<div class="bg-blobs">
-  <div class="blob blob-1" />
-  <div class="blob blob-2" />
-  <div class="blob blob-3" />
-</div>
-
 <div class="app">
   <!-- 侧边栏 -->
-  <aside class="sidebar glass">
+  <aside class="sidebar glass" class:collapsed>
     <div class="logo">
       <div class="logo-icon">G</div>
-      <div>
-        <div class="logo-name">GlassNet</div>
-        <div class="logo-sub">流量监控 · v0.1</div>
-      </div>
+      {#if !collapsed}
+        <div>
+          <div class="logo-name">GlassNet</div>
+          <div class="logo-sub">流量监控 · v0.1</div>
+        </div>
+      {/if}
+      <button class="collapse-btn" title={collapsed ? "展开侧边栏" : "收起侧边栏"}
+              onclick={() => (collapsed = !collapsed)}>
+        {collapsed ? "›" : "‹"}
+      </button>
     </div>
     <nav class="nav">
       <button class="nav-item" class:active={view === "dash"} onclick={() => (view = "dash")}>
-        <span class="icon">▤</span> 仪表盘
+        <span class="icon">▤</span>{#if !collapsed}<span class="label">仪表盘</span>{/if}
+      </button>
+      <button class="nav-item" class:active={view === "inspect"} onclick={() => (view = "inspect")}>
+        <span class="icon">⌕</span>{#if !collapsed}<span class="label">连接详情</span>{/if}
+      </button>
+      <button class="nav-item" class:active={view === "notifications"} onclick={() => { view = "notifications"; appState.unread = 0; }}>
+        <span class="icon">◔</span>{#if !collapsed}<span class="label">通知</span>{/if}
+        {#if appState.unread > 0}<span class="badge v4 num">{appState.unread}</span>{/if}
       </button>
       <button class="nav-item" class:active={view === "history"} onclick={() => { view = "history"; refreshHourly(); }}>
-        <span class="icon">◔</span> 历史记录
-      </button>
-      <button class="nav-item" onclick={() => api.showWindow("floating")}>
-        <span class="icon">□</span> 悬浮窗
+        <span class="icon">◔</span>{#if !collapsed}<span class="label">历史记录</span>{/if}
       </button>
       <button class="nav-item" onclick={() => api.showWindow("settings")}>
-        <span class="icon">⚙</span> 设置
+        <span class="icon">⚙</span>{#if !collapsed}<span class="label">设置</span>{/if}
       </button>
     </nav>
     <div class="sidebar-footer">
       <span class="status-dot" class:off={!appState.running} />
-      {appState.running ? "抓包运行中" : "抓包已停止"}
+      {#if !collapsed}{appState.running ? "抓包运行中" : "抓包已停止"}{/if}
       {#if appState.errorMsg}
         <div class="error num">{appState.errorMsg}</div>
       {/if}
@@ -133,6 +141,7 @@
           onclick={() => setFilter("v6")}
         >IPv6</button>
       </div>
+      <button class="round-btn" title="悬浮窗" onclick={() => api.showWindow("floating")}>▫</button>
       <button class="round-btn" title={appState.running ? "停止抓包" : "开始抓包"} onclick={toggleCapture}>
         {appState.running ? "■" : "▶"}
       </button>
@@ -171,21 +180,66 @@
         <div class="panel glass">
           <div class="panel-head">
             <span class="panel-title">24 小时流量</span>
-            <span class="panel-sub num">总计 {fmtBytes(v6Share().total)}</span>
+            <span class="panel-sub num">总计 {fmtBytes(v6Share().total)} · {appState.hourly.length} 桶 · 峰值 {fmtBytes(Math.max(0, ...appState.hourly.map((b) => (b.rxV4 || 0) + (b.rxV6 || 0) + (b.txV4 || 0) + (b.txV6 || 0))))}</span>
           </div>
           <HourlyBars data={appState.hourly} />
         </div>
         <div class="panel glass">
-          <div class="panel-head">
-            <span class="panel-title">实时网速</span>
-          </div>
           <LiveCurve samples={appState.speedSamples} />
+        </div>
+      </section>
+
+      <!-- 应用流量 TOP -->
+      <section class="apps">
+        <div class="panel glass">
+          <div class="panel-head">
+            <span class="panel-title">应用流量 TOP</span>
+            <span class="panel-sub">按累计 · 「连接详情」页可查看逐条流</span>
+          </div>
+          <div class="apps-row">
+            {#each appTop().slice(0, 5) as a (a.program)}
+              <div class="app-card">
+                <div class="app-name" title={a.program}>{a.program}</div>
+                <div class="app-badges">
+                  {#if a.v4}<span class="badge v4">IPv4</span>{/if}
+                  {#if a.v6}<span class="badge v6">IPv6</span>{/if}
+                </div>
+                <div class="app-num num">▼ {fmtBytes(a.rx)}</div>
+                <div class="app-num num up">▲ {fmtBytes(a.tx)}</div>
+              </div>
+            {:else}
+              <div class="app-empty">暂无应用数据 — 抓包运行后按进程聚合显示</div>
+            {/each}
+          </div>
         </div>
       </section>
 
       <!-- 连接面板 -->
       <section class="conns">
-        <ConnTable />
+        <ConnTable compact flows={filteredFlows()} rows={6} />
+      </section>
+    {:else if view === "notifications"}
+      <!-- 通知中心 -->
+      <section class="history-panel glass">
+        <div class="panel-head">
+          <span class="panel-title">通知</span>
+          <span class="panel-sub">新连接事件 · 最近 50 条</span>
+        </div>
+        <div class="feed">
+          {#each appState.events as e (e.ts + e.text)}
+            <div class="ev">
+              <span class="num time">{new Date(e.ts).toLocaleTimeString("zh-CN", { hour12: false })}</span>
+              <span class="ev-text">{e.text}</span>
+            </div>
+          {:else}
+            <div class="ev empty">暂无事件 — 新连接建立时记录</div>
+          {/each}
+        </div>
+      </section>
+    {:else if view === "inspect"}
+      <!-- 连接详情页 -->
+      <section class="history-panel glass">
+        <ConnTable flows={filteredFlows()} rows={20} />
       </section>
     {:else}
       <!-- 历史记录页 -->
@@ -214,7 +268,7 @@
   .main {
     grid-row: 1 / 3;
     display: grid;
-    grid-template-rows: 52px auto minmax(0, 1.6fr) minmax(0, 0.9fr);
+    grid-template-rows: 52px auto minmax(0, 1.25fr) auto minmax(0, 1fr);
     gap: 16px;
     height: 100%;
     min-height: 0;
@@ -227,7 +281,39 @@
     display: flex;
     flex-direction: column;
     padding: 18px 12px 14px;
+    width: 220px;
+    transition: width 0.25s ease;
   }
+  .sidebar.collapsed { width: 58px; padding: 18px 8px 14px; }
+  .collapse-btn {
+    margin-left: auto;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 6px;
+    width: 22px;
+    height: 22px;
+    transition: all 0.25s ease;
+  }
+  .collapse-btn:hover { background: rgba(0, 0, 0, 0.06); color: var(--text-primary); }
+  .collapsed .logo { padding-bottom: 14px; }
+  .collapsed .nav-item { justify-content: center; padding: 9px 6px; }
+  .collapsed .nav-item .label { display: none; }
+  .collapsed .nav-item .badge { margin-left: 0; }
+  .nav-item .badge { margin-left: auto; }
+  .feed { flex: 1; overflow: auto; }
+  .ev {
+    display: flex;
+    gap: 10px;
+    padding: 7px 2px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+    font-size: var(--fs-sm);
+  }
+  .ev .time { color: var(--text-tertiary); font-size: var(--fs-xs); min-width: 64px; }
+  .ev-text { color: var(--text-secondary); }
+  .ev.empty { justify-content: center; color: var(--text-tertiary); border: none; }
   .logo {
     display: flex;
     align-items: center;
@@ -392,6 +478,34 @@
   .panel-sub { font-size: var(--fs-xs); color: var(--text-tertiary); }
 
   .conns { min-height: 0; }
+
+  .apps { min-height: 0; }
+  .apps-row { display: flex; gap: 12px; overflow: hidden; }
+  .app-card {
+    flex: 1;
+    min-width: 0;
+    background: rgba(255, 255, 255, 0.5);
+    border: 1px solid var(--glass-edge);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+  }
+  .app-name {
+    font-weight: 600;
+    font-size: var(--fs-md);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .app-badges { display: flex; gap: 4px; margin: 5px 0; }
+  .app-num { font-size: var(--fs-sm); color: var(--accent-v4); }
+  .app-num.up { color: var(--orange); }
+  .app-empty {
+    flex: 1;
+    text-align: center;
+    color: var(--text-tertiary);
+    padding: 14px 0;
+    font-size: var(--fs-sm);
+  }
 
   .history-panel {
     padding: 18px;

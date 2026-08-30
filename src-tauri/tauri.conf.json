@@ -22,7 +22,9 @@
         "transparent": true,
         "decorations": true,
         "windowEffects": {
-          "effects": ["acrylic"],
+          "effects": [
+            "acrylic"
+          ],
           "color": "#eef1f640"
         }
       },
@@ -30,8 +32,8 @@
         "label": "floating",
         "title": "GlassNet",
         "url": "floating.html",
-        "width": 340,
-        "height": 150,
+        "width": 150,
+        "height": 74,
         "x": 40,
         "y": 40,
         "transparent": true,
@@ -41,8 +43,10 @@
         "resizable": false,
         "shadow": false,
         "windowEffects": {
-          "effects": ["acrylic"],
-          "color": "#eef1f660"
+          "effects": [
+            "acrylic"
+          ],
+          "color": "#eef1f625"
         }
       },
       {
@@ -55,7 +59,9 @@
         "resizable": false,
         "transparent": true,
         "windowEffects": {
-          "effects": ["acrylic"],
+          "effects": [
+            "acrylic"
+          ],
           "color": "#eef1f640"
         }
       }

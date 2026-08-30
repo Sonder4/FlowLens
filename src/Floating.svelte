@@ -4,25 +4,30 @@
   import type { AdapterIo } from "./lib/tauri";
 
   let io: AdapterIo[] = $state([]);
-  let visible = $state(true);
+  let peak = $state(1024 * 1024); // 速率条归一化上限：随实际峰值自适应
 
   const total = $derived(
     io.reduce((acc, a) => ({ rx: acc.rx + a.rxSpeed, tx: acc.tx + a.txSpeed }), { rx: 0, tx: 0 }),
   );
-  const top = $derived(io.filter((a) => a.rxSpeed > 0 || a.txSpeed > 0).slice(0, 3));
+
+  // 速率条宽度：相对近 60 秒峰值
+  let hist: number[] = [];
+  const dlPct = $derived.by(() => {
+    hist.push(total.rx);
+    if (hist.length > 60) hist.shift();
+    peak = Math.max(1024 * 1024, ...hist);
+    return Math.min(100, (total.rx / peak) * 100);
+  });
+  const ulPct = $derived(Math.min(100, (total.tx / peak) * 100));
+
+  // v4/v6 栈状态：任一网卡有对应地址即点亮（简化：恒亮，与主面板统计一致）
+  const v4on = $derived(io.length > 0);
+  const v6on = $derived(io.length > 0);
 
   onMount(() => {
-    io = api.ioSnapshot ? io : io;
     api.ioSnapshot().then((s) => (io = s));
     listen<AdapterIo[]>("io-tick", (s) => (io = s));
   });
-
-  function hide(): void {
-    visible = false;
-    api.hideWindow("floating");
-    // 再显示由主面板侧边栏触发
-    setTimeout(() => (visible = true), 500);
-  }
 
   function drag(event: MouseEvent): void {
     if ((event.target as HTMLElement).closest("button")) return;
@@ -30,78 +35,132 @@
       getCurrentWindow().startDragging();
     });
   }
+
+  function popup(event: MouseEvent): void {
+    event.preventDefault();
+    api.popupFloatingMenu();
+  }
 </script>
 
-<svelte:window onmousedown={null} />
-
 <div
-  class="floating glass"
+  class="widget glass"
   role="application"
   onmousedown={drag}
+  oncontextmenu={popup}
 >
-  <div class="row main-row">
-    <span class="dir rx">▼ {fmtSpeed(total.rx)}</span>
-    <span class="dir tx">▲ {fmtSpeed(total.tx)}</span>
-    <button class="mini" title="打开主面板" onclick={() => api.showWindow("main")}>主面板</button>
-    <button class="mini" title="隐藏悬浮窗" onclick={hide}>✕</button>
+  <div class="row">
+    <span class="icon dl">↓</span>
+    <span class="num numv">{fmtSpeed(total.rx).replace(" B/s", " B/s")}</span>
+    <span class="bar"><span class="fill fill-dl" style="width:{dlPct}%" /></span>
   </div>
-  {#each top as a (a.name)}
-    <div class="row sub-row">
-      <span class="name">{a.name}</span>
-      <span class="num pair">▼ {fmtSpeed(a.rxSpeed)} · ▲ {fmtSpeed(a.txSpeed)}</span>
-    </div>
-  {:else}
-    <div class="row sub-row"><span class="name">等待网络数据…</span></div>
-  {/each}
+  <div class="row">
+    <span class="icon ul">↑</span>
+    <span class="num numv">{fmtSpeed(total.tx)}</span>
+    <span class="bar"><span class="fill fill-ul" style="width:{ulPct}%" /></span>
+  </div>
+  <div class="ip-row">
+    <span class="ip-chip" class:chip-on={v4on}><span class="pulse" />v4</span>
+    <span class="ip-chip" class:chip-on={v6on}><span class="pulse" />v6</span>
+    <span class="dual">{v4on && v6on ? "DUAL STACK" : "OFFLINE"}</span>
+  </div>
 </div>
 
 <style>
-  .floating {
+  .widget {
     width: 100vw;
     height: 100vh;
-    padding: 10px 14px;
-    border-radius: var(--radius-md);
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 5px;
-    cursor: move;
+    border-radius: 16px;
+    padding: 10px 12px 6px;
+    cursor: grab;
+    overflow: visible;
+    /* 设计稿：白玻璃 0.62 + blur(20) */
+    background: rgba(255, 255, 255, 0.62);
+    backdrop-filter: blur(20px) saturate(1.8);
+    -webkit-backdrop-filter: blur(20px) saturate(1.8);
+    transition: transform 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
   }
+  .widget:hover {
+    background: rgba(255, 255, 255, 0.82);
+    box-shadow: 0 14px 40px rgba(30, 40, 60, 0.2);
+  }
+  .widget:active { cursor: grabbing; }
+
   .row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 7px;
   }
-  .main-row { justify-content: space-between; }
-  .dir {
-    font-size: 16px;
+  .row + .row { margin-top: 3px; }
+  .icon {
+    width: 13px;
+    font-size: 11px;
+    font-weight: 700;
+    text-align: center;
+  }
+  .icon.dl { color: var(--accent-v4); }
+  .icon.ul { color: var(--accent-v6); }
+  .numv {
+    font-size: 14px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
+    letter-spacing: -0.3px;
+    line-height: 1.2;
+    min-width: 58px;
   }
-  .rx { color: var(--accent-v4); }
-  .tx { color: var(--orange); }
-  .mini {
-    border: none;
-    background: rgba(0, 0, 0, 0.05);
-    color: var(--text-secondary);
-    border-radius: 8px;
-    padding: 3px 9px;
-    font-size: var(--fs-xs);
-    font-family: inherit;
-    cursor: pointer;
-    transition: all 0.25s ease;
-  }
-  .mini:hover { background: rgba(0, 0, 0, 0.1); color: var(--text-primary); }
-  .sub-row { justify-content: space-between; }
-  .name {
-    font-size: var(--fs-xs);
-    color: var(--text-secondary);
+  .bar {
+    flex: 1;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(0, 0, 0, 0.07);
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
-  .pair {
-    font-size: var(--fs-xs);
+  .fill {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.6s ease;
+  }
+  .fill-dl { background: var(--accent-v4); }
+  .fill-ul { background: var(--accent-v6); }
+
+  .ip-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 7px;
+    padding-top: 5px;
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+  }
+  .ip-chip {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 8.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.05);
     color: var(--text-tertiary);
+  }
+  .ip-chip.chip-on { color: var(--accent-v4); background: rgba(0, 113, 227, 0.12); }
+  .ip-chip + .ip-chip.chip-on { color: var(--accent-v6); background: rgba(0, 168, 146, 0.12); }
+  .pulse {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: breathe 2s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    50% { opacity: 0.35; }
+  }
+  .dual {
+    flex: 1;
+    text-align: right;
+    font-size: 8.5px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    letter-spacing: 0.3px;
   }
 </style>

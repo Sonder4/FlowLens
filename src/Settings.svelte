@@ -12,15 +12,9 @@
   });
 </script>
 
-<div class="bg-blobs">
-  <div class="blob blob-1" />
-  <div class="blob blob-2" />
-</div>
-
 <div class="settings glass">
   <div class="head">
     <span class="title">设置</span>
-    <button class="close" onclick={() => api.hideWindow("settings")}>✕</button>
   </div>
 
   <section class="group">

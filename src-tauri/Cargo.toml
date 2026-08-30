@@ -19,6 +19,7 @@ pcap = "2"
 etherparse = "0.21"
 rusqlite = { version = "0.40", features = ["bundled"] }
 sysinfo = "0.39"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 
 [profile.release]
 strip = true

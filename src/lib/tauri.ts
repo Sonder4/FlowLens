@@ -23,12 +23,15 @@ export interface AdapterIo {
   totalTx: number;
 }
 
-export interface ConnInfo {
+export interface FlowInfo {
   remote: string;
+  remotePort: number;
+  localPort: number;
+  proto: "TCP" | "UDP";
   family: "v4" | "v6";
   rx: number;
   tx: number;
-  service: string;
+  program: string;
 }
 
 export interface DeviceTick {
@@ -39,7 +42,7 @@ export interface DeviceTick {
   txV6: number;
   totalRx: number;
   totalTx: number;
-  conns: ConnInfo[];
+  flows: FlowInfo[];
 }
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -52,10 +55,13 @@ export const api = {
   startCapture: (device: string | null) => invoke<void>("start_capture", { device }),
   stopCapture: () => invoke<void>("stop_capture"),
   captureRunning: () => invoke<boolean>("capture_running"),
+  setupDone: () => invoke<boolean>("setup_done"),
   ioSnapshot: () => invoke<AdapterIo[]>("io_snapshot"),
   history: (granularity: string, adapter: string | null) =>
     invoke<HistBucket[]>("history", { granularity, adapter }),
   knownAdapters: () => invoke<[string, string | null][]>("known_adapters"),
+  popupFloatingMenu: () => invoke<void>("popup_floating_menu"),
+  localAddresses: () => invoke<string[]>("local_addresses"),
   showWindow: (label: string) => invoke<void>("show_window", { label }),
   hideWindow: (label: string) => invoke<void>("hide_window", { label }),
 };
@@ -74,7 +80,7 @@ export async function listen<T>(
 export function fmtBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(units.length - 1, Math.floor(Math.log2(bytes) / 10));
+  const i = Math.max(0, Math.min(units.length - 1, Math.floor(Math.log2(bytes) / 10)));
   const v = bytes / 2 ** (10 * i);
   const digits = v >= 100 || i === 0 ? 0 : 1;
   return `${v.toFixed(digits)} ${units[i]}`;

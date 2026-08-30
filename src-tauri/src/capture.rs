@@ -1,7 +1,7 @@
 //! Packet capture engine: one thread per device, per-second aggregation into
-//! {rx,tx} × {IPv4,IPv6} buckets plus a small per-remote-IP connection table,
-//! pushed to the frontend as `traffic-tick` events and persisted into the
-//! SQLite history (minute buckets, permanent day/month rollups).
+//! {rx,tx} × {IPv4,IPv6} buckets plus a per-flow table attributed to
+//! applications (local port → owning process), pushed to the frontend as
+//! `traffic-tick` events and persisted into the SQLite history.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -9,21 +9,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use etherparse::{LaxPacketHeaders, NetHeaders};
+use etherparse::{LaxPacketHeaders, NetHeaders, TransportHeader};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
+use crate::port_map;
 use crate::traffic_history::{self, Dir, Family};
 
-/// One remote endpoint of the live connection table.
+/// One application-attributed flow of the live connection table.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConnInfo {
+pub struct FlowInfo {
     pub remote: String,
+    pub remote_port: u16,
+    pub local_port: u16,
+    pub proto: String,
     pub family: String,
     pub rx: u64,
     pub tx: u64,
-    pub service: String,
+    pub program: String,
 }
 
 /// Presentation info of a capture device.
@@ -41,20 +45,13 @@ impl DeviceInfo {
     }
 }
 
-#[derive(Default)]
-struct ConnStat {
-    rx: u64,
-    tx: u64,
-    last_seen: u64,
-}
-
-struct DeviceState {
-    display: String,
-    adapter: Arc<str>,
-    local_addrs: Vec<IpAddr>,
-    cur: [u64; 4], // rx_v4, rx_v6, tx_v4, tx_v6
-    conns: HashMap<IpAddr, ConnStat>,
-    cur_sec: u64,
+/// Virtual adapters that duplicate real traffic or carry none: hidden from
+/// the device picker to avoid confusing entries (user report: multiple Wi-Fi).
+fn is_noise_device(desc: &str) -> bool {
+    let lower = desc.to_lowercase();
+    ["wi-fi direct", "bluetooth", "wan miniport", "microsoft kernel"]
+        .iter()
+        .any(|kw| lower.contains(kw))
 }
 
 pub fn list_devices() -> Vec<DeviceInfo> {
@@ -67,7 +64,35 @@ pub fn list_devices() -> Vec<DeviceInfo> {
             name: d.name,
         })
         .filter(|d| !d.addresses.is_empty())
+        .filter(|d| !is_noise_device(&d.display()))
         .collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FlowKey {
+    remote: IpAddr,
+    remote_port: u16,
+    local_port: u16,
+    is_tcp: bool,
+}
+
+#[derive(Default)]
+struct FlowStat {
+    rx: u64,
+    tx: u64,
+    last_seen: u64,
+    program: String,
+}
+
+struct DeviceState {
+    display: String,
+    adapter: Arc<str>,
+    local_addrs: Vec<IpAddr>,
+    cur: [u64; 4], // rx_v4, rx_v6, tx_v4, tx_v6
+    flows: HashMap<FlowKey, FlowStat>,
+    cur_sec: u64,
+    /// round-robin cursor for re-resolving unknown program names
+    recheck: usize,
 }
 
 struct Running {
@@ -107,8 +132,9 @@ pub fn start(app: &AppHandle, device: Option<String>) {
                 .filter_map(|a| a.parse().ok())
                 .collect(),
             cur: [0; 4],
-            conns: HashMap::new(),
+            flows: HashMap::new(),
             cur_sec: now_secs(),
+            recheck: 0,
         };
         let stop = Arc::clone(&stop_flag);
         let app = app.clone();
@@ -127,10 +153,7 @@ pub fn start(app: &AppHandle, device: Option<String>) {
             .unwrap_or_else(|p| p.into_inner())
             .replace(Running { stop: stop_flag });
     }
-    let _ = app.emit(
-        "capture-state",
-        serde_json::json!({ "running": spawned }),
-    );
+    let _ = app.emit("capture-state", serde_json::json!({ "running": spawned }));
 }
 
 pub fn stop() {
@@ -140,7 +163,6 @@ pub fn stop() {
         .take()
     {
         running.stop.store(true, Ordering::Relaxed);
-        // give the threads a moment to observe the flag and close their channels
         std::thread::sleep(Duration::from_millis(120));
     }
 }
@@ -162,11 +184,9 @@ fn run_device(app: AppHandle, pcap_name: String, mut state: DeviceState, stop: A
         );
         return;
     };
-
     let datalink = cap.get_datalink();
 
     while !stop.load(Ordering::Relaxed) {
-        // keep the per-second cadence even when no packets arrive
         if now_secs() != state.cur_sec {
             advance_second(&app, &mut state);
         }
@@ -206,23 +226,41 @@ fn run_device(app: AppHandle, pcap_name: String, mut state: DeviceState, stop: A
                 };
                 state.cur[idx] += bytes;
 
+                // flow bookkeeping (ports + owning application)
+                let (is_tcp, sport, dport) = match &headers.transport {
+                    Some(TransportHeader::Tcp(h)) => (true, h.source_port, h.destination_port),
+                    Some(TransportHeader::Udp(h)) => (false, h.source_port, h.destination_port),
+                    _ => continue,
+                };
                 let remote = if outgoing { dest } else { source };
-                let entry = state.conns.entry(remote).or_default();
+                let local_port = if outgoing { sport } else { dport };
+                let key = FlowKey {
+                    remote,
+                    remote_port: if outgoing { dport } else { sport },
+                    local_port,
+                    is_tcp,
+                };
+                let seen = now_secs();
+                let entry = state.flows.entry(key).or_insert_with(|| FlowStat {
+                    program: port_map::program_for(is_tcp, family == Family::V4, local_port)
+                        .unwrap_or_else(|| "其他".into()),
+                    last_seen: seen,
+                    ..FlowStat::default()
+                });
                 if dir == Dir::Rx {
                     entry.rx += bytes;
                 } else {
                     entry.tx += bytes;
                 }
-                entry.last_seen = now_secs();
-                // bound the table: drop the least recently seen entry
-                if state.conns.len() > 128 {
+                entry.last_seen = seen;
+                if state.flows.len() > 256 {
                     if let Some(oldest) = state
-                        .conns
+                        .flows
                         .iter()
-                        .min_by_key(|(_, s)| s.last_seen)
+                        .min_by_key(|(_, st)| st.last_seen)
                         .map(|(k, _)| *k)
                     {
-                        state.conns.remove(&oldest);
+                        state.flows.remove(&oldest);
                     }
                 }
             }
@@ -236,22 +274,46 @@ fn run_device(app: AppHandle, pcap_name: String, mut state: DeviceState, stop: A
 
 fn advance_second(app: &AppHandle, state: &mut DeviceState) {
     state.cur_sec = now_secs();
+
+    // re-resolve program names for flows still marked unknown: the OS port
+    // table refreshes every 3s, so connections missed at creation may match now
+    let keys: Vec<FlowKey> = state
+        .flows
+        .iter()
+        .filter(|(_, s)| s.program == "其他")
+        .map(|(k, _)| *k)
+        .collect();
+    if !keys.is_empty() {
+        for i in 0..8.min(keys.len()) {
+            let k = keys[(state.recheck + i) % keys.len()];
+            if let Some(name) = port_map::program_for(k.is_tcp, k.remote.is_ipv4(), k.local_port)
+            {
+                if let Some(st) = state.flows.get_mut(&k) {
+                    st.program = name;
+                }
+            }
+        }
+        state.recheck = (state.recheck + 8) % keys.len().max(1);
+    }
     let [rx_v4, rx_v6, tx_v4, tx_v6] = state.cur;
     state.cur = [0; 4];
 
-    let mut conns: Vec<ConnInfo> = state
-        .conns
+    let mut flows: Vec<FlowInfo> = state
+        .flows
         .iter()
-        .map(|(ip, s)| ConnInfo {
-            remote: ip.to_string(),
-            family: if ip.is_ipv4() { "v4" } else { "v6" }.into(),
-            rx: s.rx,
-            tx: s.tx,
-            service: "-".into(),
+        .map(|(k, st)| FlowInfo {
+            remote: k.remote.to_string(),
+            remote_port: k.remote_port,
+            local_port: k.local_port,
+            proto: if k.is_tcp { "TCP" } else { "UDP" }.into(),
+            family: if k.remote.is_ipv4() { "v4" } else { "v6" }.into(),
+            rx: st.rx,
+            tx: st.tx,
+            program: st.program.clone(),
         })
         .collect();
-    conns.sort_by(|a, b| (b.rx + b.tx).cmp(&(a.rx + a.tx)));
-    conns.truncate(8);
+    flows.sort_by(|a, b| (b.rx + b.tx).cmp(&(a.rx + a.tx)));
+    flows.truncate(24);
 
     let _ = app.emit(
         "traffic-tick",
@@ -263,7 +325,7 @@ fn advance_second(app: &AppHandle, state: &mut DeviceState) {
             "txV6": tx_v6,
             "totalRx": rx_v4 + rx_v6,
             "totalTx": tx_v4 + tx_v6,
-            "conns": conns,
+            "flows": flows,
         }),
     );
 }
@@ -274,10 +336,8 @@ fn sniffable_headers(
     datalink: pcap::Linktype,
 ) -> Option<LaxPacketHeaders<'_>> {
     match datalink {
-        pcap::Linktype(1) => LaxPacketHeaders::from_ethernet(packet).ok(), // Ethernet
-        pcap::Linktype(101) | pcap::Linktype(12) => {
-            LaxPacketHeaders::from_ip(packet).ok()
-        }
+        pcap::Linktype(1) => LaxPacketHeaders::from_ethernet(packet).ok(),
+        pcap::Linktype(101) | pcap::Linktype(12) => LaxPacketHeaders::from_ip(packet).ok(),
         _ => LaxPacketHeaders::from_ethernet(packet).ok(),
     }
 }
