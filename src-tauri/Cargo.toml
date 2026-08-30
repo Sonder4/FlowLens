@@ -1,0 +1,25 @@
+[package]
+name = "glassnet"
+version = "0.1.0"
+edition = "2021"
+description = "GlassNet — liquid glass network traffic monitor"
+
+[lib]
+name = "glassnet_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pcap = "2"
+etherparse = "0.21"
+rusqlite = { version = "0.40", features = ["bundled"] }
+sysinfo = "0.39"
+
+[profile.release]
+strip = true
+lto = true

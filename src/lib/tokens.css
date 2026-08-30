@@ -1,0 +1,117 @@
+:root {
+  /* GlassNet design tokens (docs/code.html) */
+  --glass-bg: rgba(255, 255, 255, 0.60);
+  --glass-bg-hover: rgba(255, 255, 255, 0.78);
+  --glass-edge: rgba(255, 255, 255, 0.95);
+  --glass-inner: rgba(0, 0, 0, 0.04);
+  --text-primary: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-tertiary: #aeaeb2;
+  --accent-v4: #0071e3;
+  --accent-v6: #00a892;
+  --green: #34c759;
+  --orange: #ff9500;
+  --shadow-soft: 0 8px 24px rgba(30, 40, 60, 0.08), 0 1px 3px rgba(30, 40, 60, 0.05);
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+  --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI",
+    "Helvetica Neue", sans-serif;
+  --fs-xl: 26px;
+  --fs-lg: 15px;
+  --fs-md: 13px;
+  --fs-sm: 12.5px;
+  --fs-xs: 11px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-stack);
+  font-size: var(--fs-md);
+  color: var(--text-primary);
+  background: transparent;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* 背景光斑：隔着白玻璃的隐约色彩 */
+.bg-blobs {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(110px);
+}
+.blob-1 {
+  width: 560px;
+  height: 560px;
+  top: -180px;
+  left: -140px;
+  background: radial-gradient(circle, rgba(0, 113, 227, 0.22), transparent 70%);
+}
+.blob-2 {
+  width: 480px;
+  height: 480px;
+  bottom: -160px;
+  right: -120px;
+  background: radial-gradient(circle, rgba(0, 168, 146, 0.18), transparent 70%);
+}
+.blob-3 {
+  width: 400px;
+  height: 400px;
+  top: 35%;
+  left: 48%;
+  background: radial-gradient(circle, rgba(255, 150, 180, 0.15), transparent 70%);
+}
+
+/* 白玻璃通用卡片 */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px) saturate(1.8);
+  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+  position: relative;
+  border: 1px solid var(--glass-edge);
+  outline: 1px solid var(--glass-inner);
+  outline-offset: -2px;
+  transition: all 0.25s ease;
+}
+.glass-hover:hover {
+  background: var(--glass-bg-hover);
+}
+
+/* 语义色与徽章 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 100px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: #fff;
+}
+.badge.v4 { background: var(--accent-v4); }
+.badge.v6 { background: var(--accent-v6); }
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
