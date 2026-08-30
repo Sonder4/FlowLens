@@ -7,9 +7,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-#[cfg(windows)]
-use sysinfo::System;
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PortKey {
     pub is_tcp: bool,
@@ -57,8 +54,12 @@ pub fn spawn_refresher() {
 
 #[cfg(windows)]
 fn loop_fn() {
+    // 复用同一个 System 实例：new_all() 每 3 秒全量重建进程表（含 exe/线程/磁盘等
+    // 完整信息）会造成持续 CPU 开销，长周期运行下白白消耗资源；
+    // refresh_processes 增量刷新且只取进程名所需的最小信息。
+    let mut sys = sysinfo::System::new();
     loop {
-        let cache = refresh_once();
+        let cache = refresh_once(&mut sys);
         *CACHE.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(cache));
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
@@ -72,12 +73,19 @@ fn loop_fn() {
 }
 
 #[cfg(windows)]
-fn refresh_once() -> Cache {
+fn refresh_once(sys: &mut sysinfo::System) -> Cache {
+    // 只刷新进程名所需的最小信息：不取 exe/命令行/线程/磁盘等重量级字段
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+
     let mut ports = HashMap::new();
     collect_tcp(&mut ports);
     collect_udp(&mut ports);
 
-    let sys = System::new_all();
     let names: HashMap<u32, String> = ports
         .values()
         .filter_map(|pid| {
