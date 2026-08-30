@@ -24,6 +24,7 @@ export interface AdapterIo {
 }
 
 export interface FlowInfo {
+  device: string;
   remote: string;
   remotePort: number;
   localPort: number;

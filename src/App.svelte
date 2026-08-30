@@ -1,22 +1,24 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-      activeConnCount,
-      initState,
-    refreshHourly,
+    activeConnCount,
     appTop,
+    displaySamples,
+    displaySpeed,
     filteredFlows,
+    initState,
+    refreshHourly,
     selectDevice,
+    sessionTotals,
     state as appState,
-    totalSpeed,
     v6Share,
-      } from "./lib/state.svelte";
+  } from "./lib/state.svelte";
   import { api, fmtBytes, fmtSpeed, listen } from "./lib/tauri";
   import HourlyBars from "./lib/components/HourlyBars.svelte";
   import LiveCurve from "./lib/components/LiveCurve.svelte";
   import ConnTable from "./lib/components/ConnTable.svelte";
 
-  type View = "dash" | "inspect" | "notifications" | "history";
+  type View = "dash" | "inspect" | "history";
   let collapsed = $state(false);
   let view: View = $state("dash");
   let devices: { name: string; display: string }[] = $state([]);
@@ -96,10 +98,6 @@
       <button class="nav-item" class:active={view === "inspect"} onclick={() => (view = "inspect")}>
         <span class="icon">⌕</span>{#if !collapsed}<span class="label">连接详情</span>{/if}
       </button>
-      <button class="nav-item" class:active={view === "notifications"} onclick={() => { view = "notifications"; appState.unread = 0; }}>
-        <span class="icon">◔</span>{#if !collapsed}<span class="label">通知</span>{/if}
-        {#if appState.unread > 0}<span class="badge v4 num">{appState.unread}</span>{/if}
-      </button>
       <button class="nav-item" class:active={view === "history"} onclick={() => { view = "history"; refreshHourly(); }}>
         <span class="icon">◔</span>{#if !collapsed}<span class="label">历史记录</span>{/if}
       </button>
@@ -152,13 +150,13 @@
       <section class="cards">
         <div class="card glass glass-hover">
           <div class="label">总下载</div>
-          <div class="value num">{fmtBytes(appState.sessionRx)}</div>
-          <div class="delta num">▼ {fmtSpeed(totalSpeed().rx)}</div>
+          <div class="value num">{fmtBytes(sessionTotals().rx)}</div>
+          <div class="delta num">▼ {fmtSpeed(displaySpeed().rx)}</div>
         </div>
         <div class="card glass glass-hover">
           <div class="label">总上传</div>
-          <div class="value num">{fmtBytes(appState.sessionTx)}</div>
-          <div class="delta num up">▲ {fmtSpeed(totalSpeed().tx)}</div>
+          <div class="value num">{fmtBytes(sessionTotals().tx)}</div>
+          <div class="delta num up">▲ {fmtSpeed(displaySpeed().tx)}</div>
         </div>
         <div class="card glass glass-hover">
           <div class="label">
@@ -185,7 +183,7 @@
           <HourlyBars data={appState.hourly} />
         </div>
         <div class="panel glass">
-          <LiveCurve samples={appState.speedSamples} />
+          <LiveCurve samples={displaySamples()} />
         </div>
       </section>
 
@@ -217,24 +215,6 @@
       <!-- 连接面板 -->
       <section class="conns">
         <ConnTable compact flows={filteredFlows()} rows={6} />
-      </section>
-    {:else if view === "notifications"}
-      <!-- 通知中心 -->
-      <section class="history-panel glass">
-        <div class="panel-head">
-          <span class="panel-title">通知</span>
-          <span class="panel-sub">新连接事件 · 最近 50 条</span>
-        </div>
-        <div class="feed">
-          {#each appState.events as e (e.ts + e.text)}
-            <div class="ev">
-              <span class="num time">{new Date(e.ts).toLocaleTimeString("zh-CN", { hour12: false })}</span>
-              <span class="ev-text">{e.text}</span>
-            </div>
-          {:else}
-            <div class="ev empty">暂无事件 — 新连接建立时记录</div>
-          {/each}
-        </div>
       </section>
     {:else if view === "inspect"}
       <!-- 连接详情页 -->
@@ -303,17 +283,6 @@
   .collapsed .nav-item .label { display: none; }
   .collapsed .nav-item .badge { margin-left: 0; }
   .nav-item .badge { margin-left: auto; }
-  .feed { flex: 1; overflow: auto; }
-  .ev {
-    display: flex;
-    gap: 10px;
-    padding: 7px 2px;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.04);
-    font-size: var(--fs-sm);
-  }
-  .ev .time { color: var(--text-tertiary); font-size: var(--fs-xs); min-width: 64px; }
-  .ev-text { color: var(--text-secondary); }
-  .ev.empty { justify-content: center; color: var(--text-tertiary); border: none; }
   .logo {
     display: flex;
     align-items: center;

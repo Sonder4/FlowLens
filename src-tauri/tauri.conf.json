@@ -33,7 +33,7 @@
         "title": "GlassNet",
         "url": "floating.html",
         "width": 150,
-        "height": 74,
+        "height": 76,
         "x": 40,
         "y": 40,
         "transparent": true,
@@ -41,13 +41,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
-        "shadow": false,
-        "windowEffects": {
-          "effects": [
-            "acrylic"
-          ],
-          "color": "#eef1f625"
-        }
+        "shadow": false
       },
       {
         "label": "settings",

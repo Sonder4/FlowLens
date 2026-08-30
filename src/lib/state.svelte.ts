@@ -1,5 +1,8 @@
 // 全局状态：Svelte 5 runes（$state / $derived），无状态管理库
 // 数据来源：后端事件（traffic-tick / io-tick / capture-state）+ 命令查询
+//
+// 切换网卡 = 纯前端显示过滤（后端始终捕获全部有地址网卡）：
+// 每台设备的累计与采样独立保存，切换即时显示对应设备的完整数据。
 
 import { api, listen } from "./tauri";
 import type { AdapterIo, DeviceInfo, DeviceTick, FlowInfo, HistBucket } from "./tauri";
@@ -11,29 +14,44 @@ export const state = $state({
   devices: [] as DeviceInfo[],
   activeDevice: null as string | null, // null = 全部网卡
   io: [] as AdapterIo[],
-  // 实时速率环形缓冲（bytes/s）
-  speedSamples: [] as { rx: number; tx: number }[],
-  // 会话累计
-  sessionRx: 0,
-  sessionTx: 0,
-  // 24 小时历史（v4/v6 × rx/tx）
+  // 实时速率采样（bytes/s）："全部网卡"合并 + 每网卡独立
+  samplesAll: [] as { rx: number; tx: number }[],
+  samplesByDevice: {} as Record<string, { rx: number; tx: number }[]>,
+  // 每设备会话累计
+  deviceTotals: {} as Record<string, { rx: number; tx: number }>,
+  // 24 小时历史（v4/v6 × rx/tx），始终为全部网卡
   hourly: [] as HistBucket[],
-  // 流表（各设备合并，按累计排序）
+  // 流表（各设备合并，带 device 标记，按累计排序）
   flows: [] as FlowInfo[],
   familyFilter: null as "v4" | "v6" | null,
-  events: [] as { ts: number; text: string }[],
-  unread: 0,
   errorMsg: null as string | null,
 });
 
-export function totalSpeed() {
-  const filtered = state.activeDevice
-    ? state.io.filter((a) => a.name === state.activeDevice)
-    : state.io;
-  return filtered.reduce(
-    (acc, a) => ({ rx: acc.rx + a.rxSpeed, tx: acc.tx + a.txSpeed }),
-    { rx: 0, tx: 0 },
-  );
+// 当前显示范围的实时速率（来自抓包采样：每秒字节 = B/s）
+export function displaySpeed() {
+  const last = displaySamples().at(-1);
+  return { rx: last?.rx ?? 0, tx: last?.tx ?? 0 };
+}
+
+// 当前显示范围的速率采样序列
+export function displaySamples() {
+  return state.activeDevice
+    ? (state.samplesByDevice[state.activeDevice] ?? [])
+    : state.samplesAll;
+}
+
+// 当前显示范围的会话累计
+export function sessionTotals() {
+  if (!state.activeDevice) {
+    let rx = 0;
+    let tx = 0;
+    for (const v of Object.values(state.deviceTotals)) {
+      rx += v.rx;
+      tx += v.tx;
+    }
+    return { rx, tx };
+  }
+  return state.deviceTotals[state.activeDevice] ?? { rx: 0, tx: 0 };
 }
 
 export function v6Share() {
@@ -50,23 +68,25 @@ export function v6Share() {
 export function activeConnCount() {
   let v4 = 0;
   let v6 = 0;
-  for (const c of state.flows) {
-    if (c.family === "v4") v4 += 1;
+  for (const f of filteredFlows()) {
+    if (f.family === "v4") v4 += 1;
     else v6 += 1;
   }
   return { total: v4 + v6, v4, v6 };
 }
 
 export function filteredFlows() {
-  return state.familyFilter
-    ? state.flows.filter((f) => f.family === state.familyFilter)
-    : state.flows;
+  return state.flows.filter(
+    (f) =>
+      (!state.familyFilter || f.family === state.familyFilter) &&
+      (!state.activeDevice || f.device === state.activeDevice),
+  );
 }
 
-/// 按进程/应用聚合（主页 TOP 卡片与检查页数据源）
+/// 按进程/应用聚合（主页 TOP 卡片与检查页数据源），尊重当前设备过滤
 export function appTop() {
   const map = new Map<string, { program: string; rx: number; tx: number; v4: boolean; v6: boolean }>();
-  for (const f of state.flows) {
+  for (const f of filteredFlows()) {
     const key = f.program;
     const e = map.get(key) ?? { program: key, rx: 0, tx: 0, v4: false, v6: false };
     e.rx += f.rx;
@@ -80,21 +100,14 @@ export function appTop() {
 
 export function mergeFlows(current: FlowInfo[], incoming: FlowInfo[]): FlowInfo[] {
   const map = new Map<string, FlowInfo>();
-  for (const f of current) map.set(`${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`, f);
+  for (const f of current) map.set(`${f.device}:${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`, f);
   for (const f of incoming) {
-    const key = `${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`;
+    const key = `${f.device}:${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`;
     const old = map.get(key);
     if (old) {
       map.set(key, { ...f, rx: Math.max(old.rx, f.rx), tx: Math.max(old.tx, f.tx) });
     } else {
       map.set(key, f);
-      const app = f.program === "其他" ? "未知应用" : f.program;
-      state.events.unshift({
-        ts: Date.now(),
-        text: `${app} 新建${f.family === "v4" ? " IPv4" : " IPv6"} ${f.proto} 连接 → ${f.remote}`,
-      });
-      if (state.events.length > 50) state.events.pop();
-      state.unread += 1;
     }
   }
   return [...map.values()].sort((a, b) => b.rx + b.tx - (a.rx + a.tx)).slice(0, 24);
@@ -131,23 +144,35 @@ export async function initState(): Promise<void> {
   });
 }
 
+// 跨设备同秒合并缓冲（"全部网卡"视图的采样）
+let secondBuf = { sec: 0, rx: 0, tx: 0 };
+
 function onTickAccumulate(tick: DeviceTick): void {
-  // 会话累计与实时样本（仅统计当前选择范围内）
-  const relevant =
-    !state.activeDevice || tick.device === state.activeDevice;
-  if (relevant) {
-    state.sessionRx += tick.totalRx;
-    state.sessionTx += tick.totalTx;
-    const last = state.speedSamples.at(-1);
-    const lastKey = `${last?.rx ?? -1}/${last?.tx ?? -1}`;
-    // 用最新一秒的速率覆盖式推进：后端每秒一 tick，直接 push
-    void lastKey;
-    state.speedSamples.push({ rx: tick.totalRx, tx: tick.totalTx });
-    if (state.speedSamples.length > SPEED_SAMPLES) {
-      state.speedSamples.shift();
+  // 每设备累计与采样：始终累积，切换零延迟
+  const totals = (state.deviceTotals[tick.device] ??= { rx: 0, tx: 0 });
+  totals.rx += tick.totalRx;
+  totals.tx += tick.totalTx;
+  const buf = (state.samplesByDevice[tick.device] ??= []);
+  buf.push({ rx: tick.totalRx, tx: tick.totalTx });
+  if (buf.length > SPEED_SAMPLES) buf.shift();
+
+  // "全部网卡"合并采样：同一秒的多个设备 tick 求和为一个点
+  const sec = Math.floor(Date.now() / 1000);
+  if (secondBuf.sec !== sec) {
+    if (secondBuf.sec !== 0) {
+      state.samplesAll.push({ rx: secondBuf.rx, tx: secondBuf.tx });
+      if (state.samplesAll.length > SPEED_SAMPLES) state.samplesAll.shift();
     }
-    state.flows = mergeFlows(state.flows, tick.flows);
+    secondBuf = { sec, rx: 0, tx: 0 };
   }
+  secondBuf.rx += tick.totalRx;
+  secondBuf.tx += tick.totalTx;
+
+  // 流表合并（打上设备标记，供切换过滤）
+  state.flows = mergeFlows(
+    state.flows,
+    tick.flows.map((f) => ({ ...f, device: tick.device })),
+  );
 }
 
 // 当前小时以内存为准：后端每 60s 才落盘一次，定时刷新会用旧数据覆盖当前桶
@@ -155,9 +180,6 @@ let liveHour = { label: "", rxV4: 0, rxV6: 0, txV4: 0, txV6: 0 };
 
 function onTrafficTick(tick: DeviceTick): void {
   onTickAccumulate(tick);
-
-  const relevant = !state.activeDevice || tick.device === state.activeDevice;
-  if (!relevant) return;
 
   const label = currentHourLabel();
   if (liveHour.label !== label) {
@@ -190,13 +212,8 @@ function onIoTick(snapshot: AdapterIo[]): void {
   state.io = snapshot;
 }
 
-export async function selectDevice(device: string | null): Promise<void> {
+export function selectDevice(device: string | null): void {
   state.activeDevice = device;
-  state.sessionRx = 0;
-  state.sessionTx = 0;
-  state.speedSamples.length = 0;
-  state.flows = [];
-  await api.startCapture(device);
 }
 
 export async function refreshHourly(): Promise<void> {

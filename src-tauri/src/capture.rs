@@ -20,6 +20,7 @@ use crate::traffic_history::{self, Dir, Family};
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowInfo {
+    pub device: String,
     pub remote: String,
     pub remote_port: u16,
     pub local_port: u16,
@@ -175,7 +176,10 @@ pub fn is_running() -> bool {
 }
 
 fn run_device(app: AppHandle, pcap_name: String, mut state: DeviceState, stop: Arc<AtomicBool>) {
+    // 读超时让阻塞的 next_packet 定期返回：网卡空闲时主循环也能
+    // 按秒推进（advance_second 发 tick），否则要等到下一个包才更新
     let Ok(mut cap) = pcap::Capture::from_device(pcap_name.as_str())
+        .map(|c| c.timeout(400))
         .and_then(|c| c.open())
     else {
         let _ = app.emit(
@@ -302,6 +306,7 @@ fn advance_second(app: &AppHandle, state: &mut DeviceState) {
         .flows
         .iter()
         .map(|(k, st)| FlowInfo {
+            device: state.display.clone(),
             remote: k.remote.to_string(),
             remote_port: k.remote_port,
             local_port: k.local_port,

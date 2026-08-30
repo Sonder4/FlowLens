@@ -5,6 +5,7 @@
 
   let io: AdapterIo[] = $state([]);
   let peak = $state(1024 * 1024); // 速率条归一化上限：随实际峰值自适应
+  let addrs: string[] = $state([]);
 
   const total = $derived(
     io.reduce((acc, a) => ({ rx: acc.rx + a.rxSpeed, tx: acc.tx + a.txSpeed }), { rx: 0, tx: 0 }),
@@ -20,13 +21,16 @@
   });
   const ulPct = $derived(Math.min(100, (total.tx / peak) * 100));
 
-  // v4/v6 栈状态：任一网卡有对应地址即点亮（简化：恒亮，与主面板统计一致）
-  const v4on = $derived(io.length > 0);
-  const v6on = $derived(io.length > 0);
+  // v4/v6 栈状态：按本机实际地址判断亮灭
+  const v4addr = $derived(addrs.find((a) => !a.includes(":")));
+  const v6addr = $derived(addrs.find((a) => a.includes(":")));
+  const v4on = $derived(!!v4addr);
+  const v6on = $derived(!!v6addr);
 
   onMount(() => {
     api.ioSnapshot().then((s) => (io = s));
     listen<AdapterIo[]>("io-tick", (s) => (io = s));
+    api.localAddresses().then((a) => (addrs = a));
   });
 
   function drag(event: MouseEvent): void {
@@ -50,7 +54,7 @@
 >
   <div class="row">
     <span class="icon dl">↓</span>
-    <span class="num numv">{fmtSpeed(total.rx).replace(" B/s", " B/s")}</span>
+    <span class="num numv">{fmtSpeed(total.rx)}</span>
     <span class="bar"><span class="fill fill-dl" style="width:{dlPct}%" /></span>
   </div>
   <div class="row">
@@ -61,7 +65,13 @@
   <div class="ip-row">
     <span class="ip-chip" class:chip-on={v4on}><span class="pulse" />v4</span>
     <span class="ip-chip" class:chip-on={v6on}><span class="pulse" />v6</span>
-    <span class="dual">{v4on && v6on ? "DUAL STACK" : "OFFLINE"}</span>
+    <span class="dual">{v4on && v6on ? "DUAL STACK" : v4on || v6on ? "SINGLE" : "OFFLINE"}</span>
+  </div>
+
+  <!-- 悬停展开：本机地址（设计稿 .ip-detail） -->
+  <div class="ip-detail">
+    <div class="line"><span class="k">v4</span><span class="v">{v4addr ?? "不可用"}</span></div>
+    <div class="line"><span class="k">v6</span><span class="v">{v6addr ?? "不可用"}</span></div>
   </div>
 </div>
 
@@ -70,13 +80,15 @@
     width: 100vw;
     height: 100vh;
     border-radius: 16px;
-    padding: 10px 12px 6px;
+    padding: 8px 12px 6px;
     cursor: grab;
     overflow: visible;
-    /* 设计稿：白玻璃 0.62 + blur(20) */
+    /* 设计稿：白玻璃 0.62 + blur(20)，窗口透明后直接悬在桌面上 */
     background: rgba(255, 255, 255, 0.62);
     backdrop-filter: blur(20px) saturate(1.8);
     -webkit-backdrop-filter: blur(20px) saturate(1.8);
+    border: 1px solid var(--glass-edge);
+    box-shadow: 0 10px 32px rgba(30, 40, 60, 0.16), 0 2px 6px rgba(30, 40, 60, 0.08);
     transition: transform 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
   }
   .widget:hover {
@@ -100,12 +112,12 @@
   .icon.dl { color: var(--accent-v4); }
   .icon.ul { color: var(--accent-v6); }
   .numv {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.3px;
-    line-height: 1.2;
-    min-width: 58px;
+    line-height: 1.15;
+    min-width: 54px;
   }
   .bar {
     flex: 1;
@@ -127,7 +139,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    margin-top: 7px;
+    margin-top: 6px;
     padding-top: 5px;
     border-top: 1px solid rgba(0, 0, 0, 0.06);
   }
@@ -162,5 +174,50 @@
     font-weight: 600;
     color: var(--text-tertiary);
     letter-spacing: 0.3px;
+  }
+
+  /* 悬停时从底部滑出：本机地址详情 */
+  .ip-detail {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(24px) saturate(1.8);
+    -webkit-backdrop-filter: blur(24px) saturate(1.8);
+    border: 1px solid var(--glass-edge);
+    box-shadow: 0 10px 32px rgba(30, 40, 60, 0.16), 0 2px 6px rgba(30, 40, 60, 0.08);
+    padding: 8px 12px;
+    opacity: 0;
+    transform: translateY(-6px);
+    pointer-events: none;
+    transition: opacity 0.25s ease, transform 0.25s ease;
+    z-index: 11;
+  }
+  .widget:hover .ip-detail {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  .ip-detail .line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .ip-detail .line + .line { margin-top: 4px; }
+  .ip-detail .k {
+    color: var(--text-tertiary);
+    font-weight: 700;
+    font-size: 8.5px;
+    width: 20px;
+  }
+  .ip-detail .v {
+    color: var(--text-secondary);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

@@ -7,7 +7,6 @@ mod port_map;
 mod traffic_history;
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::AtomicBool;
 use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::{AppHandle, Emitter, Manager};
 
