@@ -5,6 +5,7 @@
 // 每台设备的累计与采样独立保存，切换即时显示对应设备的完整数据。
 
 import { api, listen } from "./tauri";
+import { mergeFlows } from "./flows";
 import type { AdapterIo, DeviceInfo, DeviceTick, FlowInfo, HistBucket } from "./tauri";
 
 export const SPEED_SAMPLES = 90;
@@ -83,21 +84,6 @@ export function filteredFlows() {
   );
 }
 
-export function mergeFlows(current: FlowInfo[], incoming: FlowInfo[]): FlowInfo[] {
-  const map = new Map<string, FlowInfo>();
-  for (const f of current) map.set(`${f.device}:${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`, f);
-  for (const f of incoming) {
-    const key = `${f.device}:${f.remote}:${f.remotePort}:${f.localPort}:${f.proto}`;
-    const old = map.get(key);
-    if (old) {
-      map.set(key, { ...f, rx: Math.max(old.rx, f.rx), tx: Math.max(old.tx, f.tx) });
-    } else {
-      map.set(key, f);
-    }
-  }
-  return [...map.values()].sort((a, b) => b.rx + b.tx - (a.rx + a.tx)).slice(0, 24);
-}
-
 let loaded = false;
 
 const sleepMs = (ms: number): Promise<void> =>
@@ -153,11 +139,8 @@ function onTickAccumulate(tick: DeviceTick): void {
   secondBuf.rx += tick.totalRx;
   secondBuf.tx += tick.totalTx;
 
-  // 流表合并（打上设备标记，供切换过滤）
-  state.flows = mergeFlows(
-    state.flows,
-    tick.flows.map((f) => ({ ...f, device: tick.device })),
-  );
+  // 流表合并（打上设备标记，供切换过滤；超过 TTL 未出现的流会被剔除）
+  state.flows = mergeFlows(tick.flows.map((f) => ({ ...f, device: tick.device })));
 }
 
 // 当前小时以内存为准：后端每 60s 才落盘一次，定时刷新会用旧数据覆盖当前桶
