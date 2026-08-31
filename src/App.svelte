@@ -77,7 +77,7 @@
   });
 </script>
 
-<div class="app">
+<div class="app" class:collapsed>
   <!-- 侧边栏 -->
   <aside class="sidebar glass" class:collapsed>
     <div class="logo">
@@ -247,13 +247,16 @@
     position: relative;
     z-index: 1;
     display: grid;
-    /* 中间 auto 列为侧边栏占位：收起后侧栏变窄，主区域自动贴左，不产生空白 */
-    grid-template-columns: 220px auto 1fr;
+    /* 侧边栏列宽随收起状态变化（元素宽度交给网格轨道决定），主区域始终贴随其后；
+       grid-template-columns 可插值，收起/展开有平滑过渡 */
+    grid-template-columns: 220px 1fr;
     grid-template-rows: 52px 1fr;
     gap: 16px;
     padding: 16px;
     height: 100vh;
+    transition: grid-template-columns 0.25s ease;
   }
+  .app.collapsed { grid-template-columns: 58px 1fr; }
   .main {
     grid-row: 1 / 3;
     /* 内容整体滚动（超出视口可上下滑动），侧边栏与顶栏保持固定 */
@@ -266,16 +269,15 @@
   /* flex 子项默认会收缩挤压面板造成内容重叠，这里禁止收缩、按内容自然撑高 */
   .main > * { flex-shrink: 0; }
 
-  /* 侧边栏 */
+  /* 侧边栏：宽度由 .app 的网格轨道驱动，这里不再单独设 width */
   .sidebar {
     grid-row: 1 / 3;
     display: flex;
     flex-direction: column;
     padding: 18px 12px 14px;
-    width: 220px;
-    transition: width 0.25s ease;
+    min-width: 0;
   }
-  .sidebar.collapsed { width: 58px; padding: 18px 8px 14px; }
+  .sidebar.collapsed { padding: 18px 8px 14px; }
   .collapse-btn {
     margin-left: auto;
     border: none;
@@ -289,7 +291,14 @@
     transition: all 0.25s ease;
   }
   .collapse-btn:hover { background: rgba(0, 0, 0, 0.06); color: var(--text-primary); }
-  .collapsed .logo { padding-bottom: 14px; }
+  /* 收起态：logo 图标与展开按钮纵向排列，避免 58px 栏宽内横向溢出 */
+  .collapsed .logo {
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0 14px;
+  }
+  .collapsed .collapse-btn { margin-left: 0; }
   .collapsed .nav-item { justify-content: center; padding: 9px 6px; }
   .collapsed .nav-item .label { display: none; }
   .collapsed .nav-item .badge { margin-left: 0; }
