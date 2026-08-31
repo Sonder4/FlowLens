@@ -82,7 +82,14 @@ struct FlowStat {
     rx: u64,
     tx: u64,
     last_seen: u64,
-    program: String,
+    program: Arc<str>,
+}
+
+/// 应用流量按秒聚合的键：进程名 + IP 族（收/发分开计入 rx/tx）。
+#[derive(PartialEq, Eq, Hash)]
+struct AppKey {
+    program: Arc<str>,
+    family: Family,
 }
 
 struct DeviceState {
@@ -91,6 +98,7 @@ struct DeviceState {
     local_addrs: Vec<IpAddr>,
     cur: [u64; 4], // rx_v4, rx_v6, tx_v4, tx_v6
     flows: HashMap<FlowKey, FlowStat>,
+    app_cur: HashMap<AppKey, (u64, u64)>, // (rx, tx)，每秒批量落历史
     cur_sec: u64,
 }
 
@@ -132,6 +140,7 @@ pub fn start(app: &AppHandle, device: Option<String>) {
                 .collect(),
             cur: [0; 4],
             flows: HashMap::new(),
+            app_cur: HashMap::new(),
             cur_sec: now_secs(),
         };
         let stop = Arc::clone(&stop_flag);
@@ -217,8 +226,8 @@ fn run_device(app: AppHandle, pcap_name: String, mut state: DeviceState, stop: A
                 let outgoing = state.local_addrs.contains(&source);
                 let dir = if outgoing { Dir::Tx } else { Dir::Rx };
 
-                traffic_history::record(&state.adapter, family, dir, bytes);
-
+                // 历史计数改为 advance_second 每秒批量记录（见下），
+                // 抓包热路径不再做每包的哈希查找与 Arc 克隆
                 let idx = match (dir, family) {
                     (Dir::Rx, Family::V4) => 0,
                     (Dir::Rx, Family::V6) => 1,
@@ -242,20 +251,33 @@ fn run_device(app: AppHandle, pcap_name: String, mut state: DeviceState, stop: A
                     is_tcp,
                 };
                 let seen = now_secs();
-                let entry = state.flows.entry(key).or_insert_with(|| FlowStat {
-                    program: port_map::program_for(is_tcp, family == Family::V4, local_port)
-                        .unwrap_or_else(|| "其他".into()),
-                    last_seen: seen,
-                    ..FlowStat::default()
-                });
+                let program = {
+                    let entry = state.flows.entry(key).or_insert_with(|| FlowStat {
+                        program: port_map::program_for(is_tcp, family == Family::V4, local_port)
+                            .map(|s| Arc::<str>::from(s))
+                            .unwrap_or_else(|| Arc::from("其他")),
+                        last_seen: seen,
+                        ..FlowStat::default()
+                    });
+                    if dir == Dir::Rx {
+                        entry.rx += bytes;
+                    } else {
+                        entry.tx += bytes;
+                    }
+                    entry.last_seen = seen;
+                    Arc::clone(&entry.program)
+                };
+                // 按进程/协议族聚合到秒级桶，advance_second 时批量落历史：
+                // 避免每包做日期/进程名字符串分配与哈希（高频流量下的热点）
+                let agg = state
+                    .app_cur
+                    .entry(AppKey { program, family })
+                    .or_insert((0, 0));
                 if dir == Dir::Rx {
-                    entry.rx += bytes;
+                    agg.0 += bytes;
                 } else {
-                    entry.tx += bytes;
+                    agg.1 += bytes;
                 }
-                entry.last_seen = seen;
-                // 按进程累计每日流量（内存桶，60s 落盘；未识别暂记「其他」）
-                traffic_history::record_app(&entry.program, family, dir, bytes);
                 if state.flows.len() > 256 {
                     if let Some(oldest) = state
                         .flows
@@ -284,18 +306,29 @@ fn advance_second(app: &AppHandle, state: &mut DeviceState) {
     let keys: Vec<FlowKey> = state
         .flows
         .iter()
-        .filter(|(_, s)| s.program == "其他")
+        .filter(|(_, s)| s.program.as_ref() == "其他")
         .map(|(k, _)| *k)
         .collect();
     for k in keys {
         if let Some(name) = port_map::program_for(k.is_tcp, k.remote.is_ipv4(), k.local_port) {
             if let Some(st) = state.flows.get_mut(&k) {
-                st.program = name;
+                st.program = name.into();
             }
         }
     }
     let [rx_v4, rx_v6, tx_v4, tx_v6] = state.cur;
     state.cur = [0; 4];
+
+    // 每秒批量记录历史：原来每包调用一次 record/record_app，
+    // 高频流量下（每包 Arc 克隆 + 哈希 + 字符串分配）是抓包线程热点
+    traffic_history::record(&state.adapter, Family::V4, Dir::Rx, rx_v4);
+    traffic_history::record(&state.adapter, Family::V6, Dir::Rx, rx_v6);
+    traffic_history::record(&state.adapter, Family::V4, Dir::Tx, tx_v4);
+    traffic_history::record(&state.adapter, Family::V6, Dir::Tx, tx_v6);
+    let app_drained: HashMap<AppKey, (u64, u64)> = std::mem::take(&mut state.app_cur);
+    for (k, (rx, tx)) in app_drained {
+        traffic_history::record_app_totals(&k.program, k.family, rx, tx);
+    }
 
     let mut flows: Vec<FlowInfo> = state
         .flows
@@ -309,7 +342,7 @@ fn advance_second(app: &AppHandle, state: &mut DeviceState) {
             family: if k.remote.is_ipv4() { "v4" } else { "v6" }.into(),
             rx: st.rx,
             tx: st.tx,
-            program: st.program.clone(),
+            program: st.program.to_string(),
         })
         .collect();
     flows.sort_by(|a, b| (b.rx + b.tx).cmp(&(a.rx + a.tx)));

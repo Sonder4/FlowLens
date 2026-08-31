@@ -124,25 +124,31 @@ impl HistoryStore {
         }).or_insert(BucketAgg { bytes, pkts: 1 });
     }
 
-    /// 记录一个包的应用流量（按进程），累计进当日内存桶，随 flush 落盘。
-    /// 未识别归属的连接暂记为「其他」，端口表刷新后新流量会归属到正确进程。
+    /// 记录一个包的应用流量（按进程）——生产路径已改为按秒批量
+    /// `record_app_totals`，此方法仅保留给单元测试使用。
+    #[cfg(test)]
     pub fn record_app(&self, app: &str, family: Family, dir: Dir, bytes: u64) {
+        let (rx, tx) = if dir == Dir::Rx { (bytes, 0) } else { (0, bytes) };
+        self.record_app_totals(app, family, rx, tx);
+    }
+
+    /// 记录一段按秒聚合的应用流量（抓包线程每秒批量调用，避免每包分配/哈希开销）。
+    pub fn record_app_totals(&self, app: &str, family: Family, rx: u64, tx: u64) {
+        if rx == 0 && tx == 0 {
+            return;
+        }
         let key = AppDayKey {
             day: local_day(),
             app: app.to_string(),
             family,
         };
         let mut live = self.app_live.lock().expect("app live buckets lock poisoned");
-        live.entry(key).and_modify(|agg| {
-            if dir == Dir::Rx {
-                agg.rx += bytes;
-            } else {
-                agg.tx += bytes;
-            }
-        }).or_insert(AppDayAgg {
-            rx: if dir == Dir::Rx { bytes } else { 0 },
-            tx: if dir == Dir::Tx { bytes } else { 0 },
-        });
+        live.entry(key)
+            .and_modify(|agg| {
+                agg.rx += rx;
+                agg.tx += tx;
+            })
+            .or_insert(AppDayAgg { rx, tx });
     }
 
     /// Drains the live buckets into the database and refreshes rollups and retention.
@@ -488,10 +494,10 @@ pub fn query(granularity: Granularity, adapter: Option<&str>) -> Vec<HistBucket>
         .unwrap_or_default()
 }
 
-/// Records per-app packet bytes into the global store; silent no-op before `init`.
-pub fn record_app(app: &str, family: Family, dir: Dir, bytes: u64) {
+/// 记录按秒聚合的应用流量；silent no-op before `init`。
+pub fn record_app_totals(app: &str, family: Family, rx: u64, tx: u64) {
     if let Some(store) = STORE.get() {
-        store.record_app(app, family, dir, bytes);
+        store.record_app_totals(app, family, rx, tx);
     }
 }
 
