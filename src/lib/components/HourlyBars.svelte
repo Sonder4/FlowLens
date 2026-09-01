@@ -4,8 +4,10 @@
 
   interface Props {
     data: HistBucket[];
+    /** 桶粒度：hour → 刻度显示 HH:MM；day → 刻度显示 MM-DD */
+    granularity?: "hour" | "day";
   }
-  let { data }: Props = $props();
+  let { data, granularity = "hour" }: Props = $props();
 
   const W = 640;
   const H = 220;
@@ -60,10 +62,18 @@
 
   const xTicks = $derived.by(() => {
     if (data.length === 0) return [];
-    const picks = [0, Math.floor((data.length - 1) / 3), Math.floor(((data.length - 1) * 2) / 3), data.length - 1];
+    const n = data.length;
+    // 长范围加密刻度点
+    const count = n > 60 ? 7 : 4;
+    const picks =
+      count > 1
+        ? Array.from({ length: count }, (_, k) => Math.round((k * (n - 1)) / (count - 1)))
+        : [0];
+    const fmt = (label: string) =>
+      granularity === "day" ? label.slice(5, 10) : label.slice(11, 16);
     return [...new Set(picks)].map((i) => ({
       x: PAD_L + (chartW / Math.max(1, data.length)) * i + (chartW / Math.max(1, data.length)) / 2,
-      label: data[i]?.label.slice(11, 16) ?? "",
+      label: fmt(data[i]?.label ?? ""),
     }));
   });
 

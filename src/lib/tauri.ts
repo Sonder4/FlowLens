@@ -25,6 +25,32 @@ export interface AppDayRow {
   txV6: number;
 }
 
+// 任意时间范围查询：后端按跨度自动选择 小时/天 桶
+export interface RangeSeries {
+  granularity: "hour" | "day";
+  buckets: HistBucket[];
+}
+
+// 应用流量分类
+export type AppCategory = "system" | "dev" | "software" | "other";
+
+// 任意时间范围内单个应用的流量聚合（无门槛，附分类）
+export interface AppRangeRow {
+  app: string;
+  category: AppCategory;
+  rxV4: number;
+  txV4: number;
+  rxV6: number;
+  txV6: number;
+}
+
+// 已安装软件目录条目（注册表 Uninstall 键）
+export interface InstalledApp {
+  name: string;
+  publisher: string | null;
+  installLocation: string | null;
+}
+
 export interface AdapterIo {
   name: string;
   rxSpeed: number;
@@ -86,6 +112,11 @@ export const api = {
   history: (granularity: string, adapter: string | null) =>
     invoke<HistBucket[]>("history", { granularity, adapter }),
   historyAppDay: () => invoke<AppDayRow[]>("history_app_day"),
+  historyRange: (since: number, until: number, adapter: string | null) =>
+    invoke<RangeSeries>("history_range", { since, until, adapter }),
+  historyAppRange: (since: number, until: number) =>
+    invoke<AppRangeRow[]>("history_app_range", { since, until }),
+  listInstalledApps: () => invoke<InstalledApp[]>("list_installed_apps"),
   knownAdapters: () => invoke<[string, string | null][]>("known_adapters"),
   popupFloatingMenu: () => invoke<void>("popup_floating_menu"),
   localAddresses: () => invoke<string[]>("local_addresses"),

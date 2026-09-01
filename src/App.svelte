@@ -13,11 +13,13 @@
     v6Share,
   } from "./lib/state.svelte";
   import { api, fmtBytes, fmtSpeed, listen } from "./lib/tauri";
+  import type { AppRangeRow, RangeSeries } from "./lib/tauri";
   import HourlyBars from "./lib/components/HourlyBars.svelte";
   import LiveCurve from "./lib/components/LiveCurve.svelte";
   import ConnTable from "./lib/components/ConnTable.svelte";
   import AppTrafficTable from "./lib/components/AppTrafficTable.svelte";
   import AppDailyHistory from "./lib/components/AppDailyHistory.svelte";
+  import AppRangeTable from "./lib/components/AppRangeTable.svelte";
   import Settings from "./Settings.svelte";
 
   type View = "dash" | "inspect" | "history" | "settings";
@@ -57,6 +59,103 @@
       appState.running = true;
     }
   }
+
+  // ---------- 历史页：任意时间范围查询 ----------
+  type RangeKey = "today" | "yesterday" | "h24" | "d7" | "d30" | "month" | "custom";
+  const RANGE_PRESETS: { key: RangeKey; label: string }[] = [
+    { key: "today", label: "今天" },
+    { key: "yesterday", label: "昨天" },
+    { key: "h24", label: "近 24 小时" },
+    { key: "d7", label: "近 7 天" },
+    { key: "d30", label: "近 30 天" },
+    { key: "month", label: "本月" },
+    { key: "custom", label: "自定义" },
+  ];
+  const DAY_MS = 86_400_000;
+
+  let rangeKey: RangeKey = $state("today");
+  let rangeSeries: RangeSeries | null = $state(null);
+  let appRows: AppRangeRow[] = $state([]);
+  let rangeLoading = $state(false);
+  let customFrom = $state("");
+  let customTo = $state("");
+
+  function rangeBounds(key: RangeKey): { since: number; until: number; title: string } {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const hm = (d: Date): string =>
+      `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    switch (key) {
+      case "today":
+        return { since: +startOfToday, until: +now, title: "今天" };
+      case "yesterday": {
+        const from = new Date(+startOfToday - DAY_MS);
+        return { since: +from, until: +startOfToday, title: "昨天" };
+      }
+      case "h24":
+        return { since: +now - DAY_MS, until: +now, title: "近 24 小时" };
+      case "d7":
+        return { since: +now - 7 * DAY_MS, until: +now, title: "近 7 天" };
+      case "d30":
+        return { since: +now - 30 * DAY_MS, until: +now, title: "近 30 天" };
+      case "month":
+        return { since: +monthStart, until: +now, title: `本月（${now.getMonth() + 1} 月）` };
+      case "custom": {
+        const from = customFrom ? new Date(customFrom) : new Date(+now - DAY_MS);
+        const to = customTo ? new Date(customTo) : now;
+        const pad = (d: Date): number => Math.floor(+d / 1000) * 1000;
+        return {
+          since: pad(from),
+          until: pad(to),
+          title: `自定义（${from.getMonth() + 1}/${from.getDate()} ${hm(from)} ~ ${to.getMonth() + 1}/${to.getDate()} ${hm(to)}）`,
+        };
+      }
+    }
+  }
+
+  async function loadRange(): Promise<void> {
+    const b = rangeBounds(rangeKey);
+    rangeLoading = true;
+    try {
+      const [series, rows] = await Promise.all([
+        api.historyRange(Math.floor(b.since / 1000), Math.ceil(b.until / 1000), null),
+        api.historyAppRange(Math.floor(b.since / 1000), Math.ceil(b.until / 1000)),
+      ]);
+      rangeSeries = series;
+      appRows = rows;
+    } finally {
+      rangeLoading = false;
+    }
+  }
+
+  function applyPreset(key: RangeKey): void {
+    rangeKey = key;
+    // 自定义需要先填起止时间，填好后 applyCustom 触发
+    if (key !== "custom" || (customFrom && customTo)) void loadRange();
+  }
+
+  function applyCustom(): void {
+    if (!customFrom || !customTo) return;
+    rangeKey = "custom";
+    void loadRange();
+  }
+
+  // 范围内四类流量合计（来自应用归因明细）+ 图表总/峰值（网卡全量）
+  const rangeSummary = $derived.by(() => {
+    const sums = { system: 0, software: 0, dev: 0, other: 0 };
+    for (const r of appRows) {
+      sums[r.category] = (sums[r.category] ?? 0) + r.rxV4 + r.txV4 + r.rxV6 + r.txV6;
+    }
+    let total = 0;
+    let peak = 0;
+    for (const b of rangeSeries?.buckets ?? []) {
+      const t = b.rxV4 + b.rxV6 + b.txV4 + b.txV6;
+      total += t;
+      peak = Math.max(peak, t);
+    }
+    return { sums, total, peak };
+  });
 
   onMount(() => {
     initState();
@@ -100,7 +199,7 @@
       <button class="nav-item" class:active={view === "inspect"} onclick={() => (view = "inspect")}>
         <span class="icon">⌕</span>{#if !collapsed}<span class="label">连接详情</span>{/if}
       </button>
-      <button class="nav-item" class:active={view === "history"} onclick={() => { view = "history"; refreshHourly(); }}>
+      <button class="nav-item" class:active={view === "history"} onclick={() => { view = "history"; void loadRange(); }}>
         <span class="icon">◔</span>{#if !collapsed}<span class="label">历史记录</span>{/if}
       </button>
       <button class="nav-item" class:active={view === "settings"} onclick={() => (view = "settings")}>
@@ -222,13 +321,56 @@
         <Settings />
       </section>
     {:else}
-      <!-- 历史记录页 -->
+      <!-- 历史记录页：任意时间范围 + 分类汇总 + 应用明细 -->
+      <section class="history-panel glass">
+        <div class="range-head">
+          <div class="range-presets">
+            {#each RANGE_PRESETS as p (p.key)}
+              <button class="range-btn" class:active={rangeKey === p.key}
+                      onclick={() => applyPreset(p.key)}>{p.label}</button>
+            {/each}
+          </div>
+          {#if rangeKey === "custom"}
+            <div class="custom-range">
+              <input type="datetime-local" bind:value={customFrom} onchange={() => applyCustom()} />
+              <span>至</span>
+              <input type="datetime-local" bind:value={customTo} onchange={() => applyCustom()} />
+            </div>
+          {/if}
+        </div>
+        <section class="cat-cards">
+          <div class="cat-card glass">
+            <div class="label"><span class="badge-dot system" />系统流量</div>
+            <div class="value num">{fmtBytes(rangeSummary.sums.system)}</div>
+          </div>
+          <div class="cat-card glass">
+            <div class="label"><span class="badge-dot software" />软件流量</div>
+            <div class="value num">{fmtBytes(rangeSummary.sums.software)}</div>
+          </div>
+          <div class="cat-card glass">
+            <div class="label"><span class="badge-dot dev" />开发流量</div>
+            <div class="value num">{fmtBytes(rangeSummary.sums.dev)}</div>
+          </div>
+          <div class="cat-card glass">
+            <div class="label"><span class="badge-dot other" />未归类</div>
+            <div class="value num">{fmtBytes(rangeSummary.sums.other)}</div>
+          </div>
+        </section>
+        <div class="panel-head">
+          <span class="panel-title">{rangeBounds(rangeKey).title}流量</span>
+          <span class="panel-sub num">
+            {#if rangeLoading}加载中…{:else}总计 {fmtBytes(rangeSummary.total)} · {rangeSeries?.buckets.length ?? 0} 桶 · 峰值 {fmtBytes(rangeSummary.peak)}{/if}
+          </span>
+        </div>
+        <HourlyBars data={rangeSeries?.buckets ?? []} granularity={rangeSeries?.granularity ?? "hour"} />
+      </section>
+      <!-- 范围内应用流量明细（全量无门槛，四类筛选） -->
       <section class="history-panel glass">
         <div class="panel-head">
-          <span class="panel-title">24 小时流量历史</span>
-          <span class="panel-sub num">总计 {fmtBytes(v6Share().total)}</span>
+          <span class="panel-title">应用流量明细（{rangeBounds(rangeKey).title}）</span>
+          <span class="panel-sub">按进程累计 · IPv4 / IPv6 分列 · 四类筛选</span>
         </div>
-        <HourlyBars data={appState.hourly} />
+        <AppRangeTable rows={appRows} loading={rangeLoading} />
       </section>
       <!-- 应用每日流量历史（SQLite 持久化，重启后可查） -->
       <section class="history-panel glass">
@@ -491,4 +633,68 @@
     display: flex;
     flex-direction: column;
   }
+
+  /* 历史页：时间范围选择 + 分类汇总 */
+  .range-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .range-presets { display: flex; gap: 4px; flex-wrap: wrap; }
+  .range-btn {
+    padding: 5px 14px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--text-secondary);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.25s ease;
+  }
+  .range-btn:hover { background: rgba(255, 255, 255, 0.9); color: var(--text-primary); }
+  .range-btn.active {
+    background: #fff;
+    color: var(--text-primary);
+    box-shadow: 0 1px 4px rgba(30, 40, 60, 0.12);
+  }
+  .custom-range {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-sm);
+    color: var(--text-secondary);
+  }
+  .custom-range input {
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    padding: 4px 8px;
+    font: inherit;
+    font-size: var(--fs-sm);
+    background: rgba(255, 255, 255, 0.85);
+    color: var(--text-primary);
+  }
+  .cat-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .cat-card { padding: 10px 14px; }
+  .cat-card .value { font-size: var(--fs-lg); margin: 2px 0 0; }
+  .badge-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 2px;
+  }
+  .badge-dot.system { background: #6b7a90; }
+  .badge-dot.software { background: var(--accent-v4, #2f7cf6); }
+  .badge-dot.dev { background: #8e6bd6; }
+  .badge-dot.other { background: #b0b4bc; }
 </style>
