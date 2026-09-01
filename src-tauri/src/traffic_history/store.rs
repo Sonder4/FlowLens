@@ -22,9 +22,9 @@ use super::types::{
 /// Minute-level details are kept for this many days; day/month rollups are kept forever.
 const RETENTION_MINUTE_DAYS: i64 = 90;
 
-/// 应用每日流量入库门槛：单日（v4+v6、收+发）合计超过 1 GB 才持久化。
+/// 应用每日流量入库门槛：单日（v4+v6、收+发）合计超过 100 MB 才持久化。
 /// 低于门槛的行在每次落盘时清理（含跨天的历史残留），显著压缩数据库体积。
-pub const APP_DAY_THRESHOLD_BYTES: u64 = 1_000_000_000;
+pub const APP_DAY_THRESHOLD_BYTES: u64 = 100_000_000;
 
 /// Flush cadence of the background flusher thread, in seconds.
 pub const FLUSH_INTERVAL_SECS: u64 = 60;
@@ -210,7 +210,7 @@ impl HistoryStore {
         )?;
         tx.commit()?;
 
-        // 应用每日流量：增量 upsert 后只清理「过去日期」中未达 1GB 门槛的行。
+        // 应用每日流量：增量 upsert 后只清理「过去日期」中未达门槛的行。
         // 当天的行保留增量累计（跨 flush、跨重启都能加总），日界后第一次
         // flush 时统一判定：不达标整组删除，达标永久保留。
         let drained_apps: HashMap<AppDayKey, AppDayAgg> = std::mem::take(
@@ -325,7 +325,7 @@ impl HistoryStore {
     }
 
     /// 查询应用每日流量历史（按 本地日期 × 进程 汇总 v4/v6 收发）。
-    /// 已入库的行都满足 >1GB 门槛；尚未落盘的内存桶合并进来后按门槛过滤，
+    /// 已入库的行都满足入库门槛；尚未落盘的内存桶合并进来后按门槛过滤，
     /// 保证刚产生的重流量应用立即可见。
     pub fn query_app_days(&self) -> Result<Vec<AppDayRow>, rusqlite::Error> {
         // (day, app) -> row；BTreeMap 保持日期有序
@@ -383,7 +383,7 @@ impl HistoryStore {
             *tx += agg.tx;
         }
         drop(live);
-        // 门槛过滤：合并后合计不足 1GB 的应用不展示
+        // 门槛过滤：合并后合计不足 100MB 的应用不展示
         let mut rows: Vec<AppDayRow> = map
             .into_values()
             .filter(|r| r.rx_v4 + r.tx_v4 + r.rx_v6 + r.tx_v6 >= APP_DAY_THRESHOLD_BYTES)
@@ -612,23 +612,23 @@ mod tests {
     #[test]
     fn test_app_daily_accumulates_across_flushes_and_filters_threshold() {
         let store = store();
-        // 第一段 600MB：未达 1GB，查询不可见（行保留在库中等待次日判定）
-        store.record_app("heavy.exe", Family::V4, Dir::Rx, 600_000_000);
+        // 第一段 60MB：未达 100MB 门槛，查询不可见（行保留在库中等待次日判定）
+        store.record_app("heavy.exe", Family::V4, Dir::Rx, 60_000_000);
         store.flush().expect("flush 1");
         assert!(store.query_app_days().expect("q").is_empty());
 
-        // 第二段 600MB：增量加总 1.2GB 超过门槛，v4/v6 明细正确
-        store.record_app("heavy.exe", Family::V4, Dir::Rx, 600_000_000);
+        // 第二段 60MB：增量加总 120MB 超过门槛，v4/v6 明细正确
+        store.record_app("heavy.exe", Family::V4, Dir::Rx, 60_000_000);
         store.record_app("heavy.exe", Family::V6, Dir::Tx, 50);
         store.flush().expect("flush 2");
         let rows = store.query_app_days().expect("q 2");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].app, "heavy.exe");
-        assert_eq!(rows[0].rx_v4, 1_200_000_000);
+        assert_eq!(rows[0].rx_v4, 120_000_000);
         assert_eq!(rows[0].tx_v6, 50);
 
-        // 低流量应用（999MB）当天同样不展示
-        store.record_app("small.exe", Family::V4, Dir::Tx, 999_999_999);
+        // 低流量应用（99.99MB，差 0.01MB 达标）当天同样不展示
+        store.record_app("small.exe", Family::V4, Dir::Tx, 99_999_999);
         store.flush().expect("flush 3");
         let rows = store.query_app_days().expect("q 3");
         assert_eq!(rows.len(), 1);

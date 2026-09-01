@@ -1,5 +1,5 @@
 <!-- 应用每日流量历史：读取本地 SQLite（traffic_app_day），
-     仅展示单日合计 > 1GB 的应用，IPv4 / IPv6 收发分列 -->
+     仅展示单日合计 > 100MB 的应用，IPv4 / IPv6 收发分列 -->
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, fmtBytes } from "../tauri";
@@ -49,14 +49,14 @@
           <td colspan="6" class="empty">
             {loading
               ? "加载中…"
-              : "暂无数据 — 应用单日合计流量超过 1 GB 后自动入库（IPv4 / IPv6 分列，关闭应用时也会保存）"}
+              : "暂无数据 — 应用单日合计流量超过 100 MB 后自动入库（IPv4 / IPv6 分列，关闭应用时也会保存）"}
           </td>
         </tr>
       {/each}
     </tbody>
   </table>
   <p class="note">
-    为减少数据库体积，仅持久化单日合计（收 + 发、v4 + v6）超过 1 GB 的应用；
+    为减少数据库体积，仅持久化单日合计（收 + 发、v4 + v6）超过 100 MB 的应用；
     未达门槛的应用不写入数据库。数据保存在本地 SQLite，重启后仍可查看。
   </p>
 </div>

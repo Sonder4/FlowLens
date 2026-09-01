@@ -86,7 +86,7 @@ fn restart_as_admin() -> Result<(), String> {
     Err("仅 Windows 支持 UAC 提权重启".into())
 }
 
-/// 应用每日流量历史（仅保留单日合计 > 1GB 的应用，v4/v6 收发明细）
+/// 应用每日流量历史（仅保留单日合计 > 100MB 的应用，v4/v6 收发明细）
 #[tauri::command]
 fn history_app_day() -> Vec<traffic_history::AppDayRow> {
     traffic_history::query_app_days()

@@ -15,7 +15,7 @@ export interface HistBucket {
   txV6: number;
 }
 
-// 应用每日流量历史行（仅入库单日合计 > 1GB 的应用）
+// 应用每日流量历史行（仅入库单日合计 > 100MB 的应用）
 export interface AppDayRow {
   day: string;
   app: string;
