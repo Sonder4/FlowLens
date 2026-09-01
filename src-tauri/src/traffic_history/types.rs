@@ -62,18 +62,19 @@ pub struct BucketKey {
     pub minute: i64,
 }
 
-/// 应用每日流量的内存累计键：本地日期 + 进程名 + IP 族。
+/// 应用每小时流量的内存累计键：本地小时桶 + 进程名 + IP 族。
+/// 小时粒度支撑任意时间范围的应用明细查询（`traffic_app_hour` 表）。
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct AppDayKey {
-    /// 本地日期，`YYYY-MM-DD`
-    pub day: String,
+pub struct AppHourKey {
+    /// 本地小时桶，`YYYY-MM-DD HH:00`
+    pub hour: String,
     pub app: String,
     pub family: Family,
 }
 
-/// 应用每日流量的收/发累计（字节数）。
+/// 应用流量的收/发累计（字节数）。
 #[derive(Clone, Copy, Debug, Default)]
-pub struct AppDayAgg {
+pub struct AppAgg {
     pub rx: u64,
     pub tx: u64,
 }
@@ -89,6 +90,26 @@ pub struct AppDayRow {
     pub tx_v4: u64,
     pub rx_v6: u64,
     pub tx_v6: u64,
+}
+
+/// 任意时间范围内单个应用的流量聚合（无门槛全量明细）。
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUsageRow {
+    pub app: String,
+    pub rx_v4: u64,
+    pub tx_v4: u64,
+    pub rx_v6: u64,
+    pub tx_v6: u64,
+}
+
+/// 任意时间范围的总流量序列；粒度由后端按跨度自动选择。
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RangeSeries {
+    /// `hour`（小时桶）或 `day`（天桶）
+    pub granularity: String,
+    pub buckets: Vec<HistBucket>,
 }
 
 /// Accumulated counters of a single bucket.

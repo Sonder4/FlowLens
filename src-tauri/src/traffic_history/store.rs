@@ -15,12 +15,18 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 
 use super::types::{
-    AppDayAgg, AppDayKey, AppDayRow,
-    BucketAgg, BucketKey, Dir, Family, Granularity, HistBucket,
+    AppAgg, AppDayRow, AppHourKey, AppUsageRow,
+    BucketAgg, BucketKey, Dir, Family, Granularity, HistBucket, RangeSeries,
 };
 
 /// Minute-level details are kept for this many days; day/month rollups are kept forever.
 const RETENTION_MINUTE_DAYS: i64 = 90;
+
+/// Hour-level per-app details share the minute table's retention window.
+const RETENTION_APP_HOUR_DAYS: i64 = 90;
+
+/// 跨度不超过该值的时间范围按小时粒度出桶（更大跨度按天）。
+const HOUR_BUCKET_MAX_SPAN_SECS: i64 = 48 * 3600;
 
 /// 应用每日流量入库门槛：单日（v4+v6、收+发）合计超过 100 MB 才持久化。
 /// 低于门槛的行在每次落盘时清理（含跨天的历史残留），显著压缩数据库体积。
@@ -32,7 +38,7 @@ pub const FLUSH_INTERVAL_SECS: u64 = 60;
 pub struct HistoryStore {
     conn: Mutex<Connection>,
     live: Mutex<HashMap<BucketKey, BucketAgg>>,
-    app_live: Mutex<HashMap<AppDayKey, AppDayAgg>>,
+    app_live: Mutex<HashMap<AppHourKey, AppAgg>>,
 }
 
 impl HistoryStore {
@@ -105,7 +111,16 @@ impl HistoryStore {
                 rx_bytes INTEGER NOT NULL,
                 tx_bytes INTEGER NOT NULL,
                 PRIMARY KEY (day, app, family)
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS traffic_app_hour (
+                hour     TEXT NOT NULL,
+                app      TEXT NOT NULL,
+                family   TEXT NOT NULL,
+                rx_bytes INTEGER NOT NULL,
+                tx_bytes INTEGER NOT NULL,
+                PRIMARY KEY (hour, app, family)
+            );
+            CREATE INDEX IF NOT EXISTS idx_app_hour_hour ON traffic_app_hour (hour);",
         )
     }
 
@@ -133,12 +148,14 @@ impl HistoryStore {
     }
 
     /// 记录一段按秒聚合的应用流量（抓包线程每秒批量调用，避免每包分配/哈希开销）。
+    /// 按「本地小时桶 × 进程 × IP 族」累计，落盘进 traffic_app_hour，
+    /// 支撑任意时间范围的应用明细查询；天级汇总表由 flush 时从该表 rollup。
     pub fn record_app_totals(&self, app: &str, family: Family, rx: u64, tx: u64) {
         if rx == 0 && tx == 0 {
             return;
         }
-        let key = AppDayKey {
-            day: local_day(),
+        let key = AppHourKey {
+            hour: local_hour_label(),
             app: app.to_string(),
             family,
         };
@@ -148,7 +165,7 @@ impl HistoryStore {
                 agg.rx += rx;
                 agg.tx += tx;
             })
-            .or_insert(AppDayAgg { rx, tx });
+            .or_insert(AppAgg { rx, tx });
     }
 
     /// Drains the live buckets into the database and refreshes rollups and retention.
@@ -210,26 +227,25 @@ impl HistoryStore {
         )?;
         tx.commit()?;
 
-        // 应用每日流量：增量 upsert 后只清理「过去日期」中未达门槛的行。
-        // 当天的行保留增量累计（跨 flush、跨重启都能加总），日界后第一次
-        // flush 时统一判定：不达标整组删除，达标永久保留。
-        let drained_apps: HashMap<AppDayKey, AppDayAgg> = std::mem::take(
+        // 应用每小时流量：增量 upsert 进 traffic_app_hour（无门槛全量明细），
+        // 再由该表 rollup 出天级汇总 traffic_app_day（近 2 天 REPLACE 幂等重算）。
+        // 天级表只清理「过去日期」中未达门槛的行；小时明细按保留期清理。
+        let drained_apps: HashMap<AppHourKey, AppAgg> = std::mem::take(
             &mut *self.app_live.lock().expect("app live buckets lock poisoned"),
         );
         if !drained_apps.is_empty() {
-            let today = local_day();
             let tx = conn.transaction()?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT INTO traffic_app_day (day, app, family, rx_bytes, tx_bytes)
+                    "INSERT INTO traffic_app_hour (hour, app, family, rx_bytes, tx_bytes)
                      VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(day, app, family) DO UPDATE
+                     ON CONFLICT(hour, app, family) DO UPDATE
                      SET rx_bytes = rx_bytes + excluded.rx_bytes,
                          tx_bytes = tx_bytes + excluded.tx_bytes",
                 )?;
                 for (key, agg) in &drained_apps {
                     stmt.execute(rusqlite::params![
-                        key.day,
+                        key.hour,
                         key.app,
                         key.family.label(),
                         i64::try_from(agg.rx).unwrap_or(i64::MAX),
@@ -237,21 +253,44 @@ impl HistoryStore {
                     ])?;
                 }
             }
-            tx.execute(
-                "DELETE FROM traffic_app_day
-                 WHERE day < ?1
-                   AND (day, app) IN (
-                       SELECT day, app FROM traffic_app_day
-                       GROUP BY day, app
-                       HAVING SUM(rx_bytes + tx_bytes) < ?2
-                   )",
-                rusqlite::params![
-                    today,
-                    i64::try_from(APP_DAY_THRESHOLD_BYTES).unwrap_or(i64::MAX)
-                ],
-            )?;
             tx.commit()?;
         }
+
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO traffic_app_day (day, app, family, rx_bytes, tx_bytes)
+             SELECT substr(hour, 1, 10), app, family, SUM(rx_bytes), SUM(tx_bytes)
+             FROM traffic_app_hour
+             WHERE hour >= ?1
+             GROUP BY 1, 2, 3
+             ON CONFLICT(day, app, family) DO UPDATE
+             SET rx_bytes = excluded.rx_bytes, tx_bytes = excluded.tx_bytes",
+            rusqlite::params![local_label_of(
+                now_secs() - 2 * 86400,
+                "%Y-%m-%d 00:00"
+            )],
+        )?;
+        tx.execute(
+            "DELETE FROM traffic_app_day
+             WHERE day < ?1
+               AND (day, app) IN (
+                   SELECT day, app FROM traffic_app_day
+                   GROUP BY day, app
+                   HAVING SUM(rx_bytes + tx_bytes) < ?2
+               )",
+            rusqlite::params![
+                local_day(),
+                i64::try_from(APP_DAY_THRESHOLD_BYTES).unwrap_or(i64::MAX)
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM traffic_app_hour WHERE hour < ?1",
+            rusqlite::params![local_label_of(
+                now_secs() - RETENTION_APP_HOUR_DAYS * 86400,
+                "%Y-%m-%d 00:00"
+            )],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -362,13 +401,14 @@ impl HistoryStore {
                 map.insert((r.day.clone(), r.app.clone()), r);
             }
         }
-        // 合并尚未落盘的内存累计
+        // 合并尚未落盘的内存累计（内存键为小时桶，这里归并到天）
         let live = self.app_live.lock().expect("app live buckets lock poisoned");
         for (key, agg) in live.iter() {
+            let day = key.hour.get(..10).unwrap_or("").to_string();
             let e = map
-                .entry((key.day.clone(), key.app.clone()))
+                .entry((day.clone(), key.app.clone()))
                 .or_insert_with(|| AppDayRow {
-                    day: key.day.clone(),
+                    day,
                     app: key.app.clone(),
                     rx_v4: 0,
                     tx_v4: 0,
@@ -396,6 +436,152 @@ impl HistoryStore {
         });
         Ok(rows)
     }
+
+    /// 任意时间范围的总流量序列。跨度 ≤48h 且起点在分钟保留期内 →
+    /// 查 traffic_minute 按小时桶；否则 → 查 traffic_day 按天桶
+    /// （day 表永久保留，超出分钟保留期的范围也能查，但粒度降为天）。
+    pub fn query_range(
+        &self,
+        since_ts: i64,
+        until_ts: i64,
+        adapter: Option<&str>,
+    ) -> Result<RangeSeries, rusqlite::Error> {
+        const PIVOT: &str = "COALESCE(SUM(CASE WHEN family = 'v4' AND dir = 'rx' THEN bytes END), 0) AS rx_v4, \
+             COALESCE(SUM(CASE WHEN family = 'v6' AND dir = 'rx' THEN bytes END), 0) AS rx_v6, \
+             COALESCE(SUM(CASE WHEN family = 'v4' AND dir = 'tx' THEN bytes END), 0) AS tx_v4, \
+             COALESCE(SUM(CASE WHEN family = 'v6' AND dir = 'tx' THEN bytes END), 0) AS tx_v6";
+        let hourly = until_ts.saturating_sub(since_ts) <= HOUR_BUCKET_MAX_SPAN_SECS
+            && since_ts >= now_secs() - RETENTION_MINUTE_DAYS * 86400;
+        let (granularity, sql) = if hourly {
+            (
+                "hour",
+                format!(
+                    "SELECT strftime('%Y-%m-%d %H:00', ts, 'unixepoch', 'localtime') AS bucket, {PIVOT} \
+                     FROM traffic_minute \
+                     WHERE ts >= ?2 AND ts <= ?3 AND (?1 IS NULL OR adapter = ?1) \
+                     GROUP BY bucket ORDER BY bucket"
+                ),
+            )
+        } else {
+            (
+                "day",
+                format!(
+                    "SELECT bucket, {PIVOT} \
+                     FROM traffic_day \
+                     WHERE bucket >= ?2 AND bucket <= ?3 AND (?1 IS NULL OR adapter = ?1) \
+                     GROUP BY bucket ORDER BY bucket"
+                ),
+            )
+        };
+        let adapter_value =
+            adapter.map_or(Value::Null, |name| Value::Text(name.to_string()));
+        let since_value = if hourly {
+            Value::Integer(since_ts)
+        } else {
+            Value::Text(local_label_of(since_ts, "%Y-%m-%d"))
+        };
+        let until_value = if hourly {
+            Value::Integer(until_ts)
+        } else {
+            Value::Text(local_label_of(until_ts, "%Y-%m-%d"))
+        };
+
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter([adapter_value, since_value, until_value]),
+            |row| {
+                let read = |idx: usize| -> Result<u64, rusqlite::Error> {
+                    Ok(u64::try_from(row.get::<_, i64>(idx)?).unwrap_or_default())
+                };
+                Ok(HistBucket {
+                    label: row.get(0)?,
+                    rx_v4: read(1)?,
+                    rx_v6: read(2)?,
+                    tx_v4: read(3)?,
+                    tx_v6: read(4)?,
+                })
+            },
+        )?;
+        Ok(RangeSeries {
+            granularity: granularity.to_string(),
+            buckets: rows.collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    /// 任意时间范围内按应用的流量聚合：traffic_app_hour 全量明细
+    /// （无门槛）+ 尚未落盘的内存桶，按合计流量降序。
+    pub fn query_app_range(
+        &self,
+        since_ts: i64,
+        until_ts: i64,
+    ) -> Result<Vec<AppUsageRow>, rusqlite::Error> {
+        let since_label = local_label_of(since_ts, "%Y-%m-%d %H:00");
+        let until_label = local_label_of(until_ts, "%Y-%m-%d %H:00");
+        let mut map: HashMap<String, AppUsageRow> = HashMap::new();
+        {
+            let conn = self.conn.lock().expect("db lock poisoned");
+            let mut stmt = conn.prepare(
+                "SELECT app, \
+                    COALESCE(SUM(CASE WHEN family = 'v4' THEN rx_bytes END), 0), \
+                    COALESCE(SUM(CASE WHEN family = 'v4' THEN tx_bytes END), 0), \
+                    COALESCE(SUM(CASE WHEN family = 'v6' THEN rx_bytes END), 0), \
+                    COALESCE(SUM(CASE WHEN family = 'v6' THEN tx_bytes END), 0) \
+                 FROM traffic_app_hour \
+                 WHERE hour >= ?1 AND hour <= ?2 \
+                 GROUP BY app",
+            )?;
+            let read = |v: rusqlite::Result<i64, rusqlite::Error>| -> u64 {
+                v.map(|n| u64::try_from(n).unwrap_or_default()).unwrap_or_default()
+            };
+            let rows = stmt.query_map(rusqlite::params![since_label, until_label], |row| {
+                Ok(AppUsageRow {
+                    app: row.get(0)?,
+                    rx_v4: read(row.get(1)),
+                    tx_v4: read(row.get(2)),
+                    rx_v6: read(row.get(3)),
+                    tx_v6: read(row.get(4)),
+                })
+            })?;
+            for r in rows {
+                let r = r?;
+                map.insert(r.app.clone(), r);
+            }
+        }
+        // 合并尚未落盘的内存累计（键为小时桶，逐桶判断是否落在范围内）
+        let live = self.app_live.lock().expect("app live buckets lock poisoned");
+        for (key, agg) in live.iter() {
+            if key.hour.as_str() < since_label.as_str()
+                || key.hour.as_str() > until_label.as_str()
+            {
+                continue;
+            }
+            let e = map.entry(key.app.clone()).or_insert_with(|| AppUsageRow {
+                app: key.app.clone(),
+                rx_v4: 0,
+                tx_v4: 0,
+                rx_v6: 0,
+                tx_v6: 0,
+            });
+            match key.family {
+                Family::V4 => {
+                    e.rx_v4 += agg.rx;
+                    e.tx_v4 += agg.tx;
+                }
+                Family::V6 => {
+                    e.rx_v6 += agg.rx;
+                    e.tx_v6 += agg.tx;
+                }
+            }
+        }
+        drop(live);
+        let mut rows: Vec<AppUsageRow> = map.into_values().collect();
+        rows.sort_by(|a, b| {
+            (b.rx_v4 + b.tx_v4 + b.rx_v6 + b.tx_v6)
+                .cmp(&(a.rx_v4 + a.tx_v4 + a.rx_v6 + a.tx_v6))
+        });
+        Ok(rows)
+    }
 }
 
 fn now_secs() -> i64 {
@@ -411,6 +597,22 @@ fn now_minute() -> i64 {
 /// 当前本地日期，`YYYY-MM-DD`（应用每日流量的键）
 fn local_day() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// 当前本地小时桶标签，`YYYY-MM-DD HH:00`（应用每小时流量的键）
+fn local_hour_label() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:00").to_string()
+}
+
+/// 把 UTC epoch 秒格式化为本地时间标签；无效时间戳回退为空串
+/// （用于 SQL 文本比较时表示该侧不设限）。
+fn local_label_of(ts: i64, fmt: &str) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|d| d.format(fmt).to_string())
+        .unwrap_or_default()
 }
 
 static STORE: OnceLock<HistoryStore> = OnceLock::new();
@@ -506,6 +708,21 @@ pub fn query_app_days() -> Vec<AppDayRow> {
     STORE
         .get()
         .and_then(|store| store.query_app_days().ok())
+        .unwrap_or_default()
+}
+
+/// 任意时间范围的总流量序列；silent no-op（空序列）before `init`。
+pub fn query_range(since_ts: i64, until_ts: i64, adapter: Option<&str>) -> Option<RangeSeries> {
+    STORE
+        .get()
+        .and_then(|store| store.query_range(since_ts, until_ts, adapter).ok())
+}
+
+/// 任意时间范围的应用流量聚合；silent no-op（空结果）before `init`。
+pub fn query_app_range(since_ts: i64, until_ts: i64) -> Vec<AppUsageRow> {
+    STORE
+        .get()
+        .and_then(|store| store.query_app_range(since_ts, until_ts).ok())
         .unwrap_or_default()
 }
 
@@ -656,6 +873,85 @@ mod tests {
         assert!(rows.iter().any(|r| r.app == "big.exe" && r.day == "2000-01-01"));
         assert!(rows.iter().any(|r| r.app == "heavy.exe" && r.rx_v4 == 1_500_000_000));
         assert!(!rows.iter().any(|r| r.app == "old.exe"));
+    }
+
+    #[test]
+    fn test_app_hour_range_query() {
+        let store = store();
+        // 当前小时记录并 flush，范围查询按应用聚合 v4/v6
+        store.record_app("a.exe", Family::V4, Dir::Rx, 100);
+        store.record_app("a.exe", Family::V6, Dir::Tx, 30);
+        store.record_app("b.exe", Family::V4, Dir::Rx, 50);
+        store.flush().expect("flush");
+
+        let now = now_secs();
+        let rows = store.query_app_range(now - 3600, now + 3600).expect("range");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].app, "a.exe"); // 130 > 80，降序
+        assert_eq!(rows[0].rx_v4, 100);
+        assert_eq!(rows[0].tx_v6, 30);
+        assert_eq!(rows[1].app, "b.exe");
+        assert_eq!(rows[1].rx_v4, 50);
+
+        // 完全范围外的查询为空
+        let empty = store
+            .query_app_range(now - 20 * 86400, now - 10 * 86400)
+            .expect("old");
+        assert!(empty.is_empty());
+
+        // 未落盘的内存桶同样并入范围内
+        store.record_app("c.exe", Family::V4, Dir::Rx, 7);
+        let rows = store.query_app_range(now - 300, now + 300).expect("live");
+        let c = rows.iter().find(|r| r.app == "c.exe").expect("c.exe live");
+        assert_eq!(c.rx_v4, 7);
+    }
+
+    #[test]
+    fn test_app_hour_day_rollup_and_threshold() {
+        let store = store();
+        // 小时明细全量落库；天级汇总表仍按 100MB 门槛过滤
+        store.record_app("big.exe", Family::V4, Dir::Rx, 150_000_000);
+        store.record_app("small.exe", Family::V4, Dir::Rx, 50_000_000);
+        store.flush().expect("flush");
+
+        let days = store.query_app_days().expect("days");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].app, "big.exe");
+        assert_eq!(days[0].rx_v4, 150_000_000);
+
+        // 但小时明细范围查询不设门槛，小应用也可见
+        let now = now_secs();
+        let rows = store.query_app_range(now - 3600, now + 3600).expect("range");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_query_range_hourly_and_daily() {
+        let store = store();
+        let adapter = arc("eth0");
+        store.record(&adapter, Family::V4, Dir::Rx, 300);
+        store.flush().expect("flush");
+        let now = now_secs();
+
+        // 12 小时范围（≤48h 且在保留期内）→ 小时桶
+        let series = store.query_range(now - 12 * 3600, now, None).expect("hourly");
+        assert_eq!(series.granularity, "hour");
+        assert_eq!(series.buckets.len(), 1);
+        assert_eq!(series.buckets[0].rx_v4, 300);
+
+        // 10 天范围 → 天桶（来自 traffic_day rollup）
+        let series = store
+            .query_range(now - 10 * 86400, now, Some("eth0"))
+            .expect("daily");
+        assert_eq!(series.granularity, "day");
+        assert_eq!(series.buckets.len(), 1);
+        assert_eq!(series.buckets[0].rx_v4, 300);
+
+        // 网卡过滤生效
+        let series = store
+            .query_range(now - 12 * 3600, now, Some("nope"))
+            .expect("filtered");
+        assert!(series.buckets.is_empty());
     }
 
 }
