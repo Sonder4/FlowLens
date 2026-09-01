@@ -180,7 +180,15 @@
   <!-- 侧边栏 -->
   <aside class="sidebar glass" class:collapsed>
     <div class="logo">
-      <div class="logo-icon">F</div>
+      <div class="logo-icon">
+        <svg viewBox="0 0 512 512" width="19" height="19" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="256" cy="256" r="140" stroke="#fff" stroke-width="56"/>
+          <g clip-path="url(#lensLogo)">
+            <path d="M 122 256 C 170 202, 226 202, 256 256 C 286 310, 342 310, 390 256" stroke="#fff" stroke-width="44" stroke-linecap="round"/>
+          </g>
+          <defs><clipPath id="lensLogo"><circle cx="256" cy="256" r="119"/></clipPath></defs>
+        </svg>
+      </div>
       {#if !collapsed}
         <div>
           <div class="logo-name">FlowLens</div>
