@@ -648,38 +648,49 @@ pub fn init() {
     init_at(&path);
 }
 
-/// 旧版数据目录一次性迁移（glassnet → flowlens）：新目录尚无数据库且旧库
-/// 存在时，整库拷贝（db/wal/shm），保留用户全部历史数据。
+/// 旧数据目录一次性迁移：新目录尚无数据库时，按序尝试从旧目录
+/// （%APPDATA%/flowlens、%APPDATA%/glassnet 等）整库拷贝（db/wal/shm）。
+/// 典型场景：应用更名，或通过 FLOWLENS_DATA_DIR 把数据指到其他磁盘。
 fn migrate_legacy_data_dir(new_dir: &Path) {
-    #[cfg(target_os = "windows")]
-    let legacy = std::env::var_os("APPDATA")
-        .map(|d| std::path::PathBuf::from(d).join("glassnet"));
-    #[cfg(not(target_os = "windows"))]
-    let legacy = std::env::var_os("HOME")
-        .map(|d| std::path::PathBuf::from(d).join(".local/share/glassnet"));
-    let Some(old_dir) = legacy else {
-        return;
-    };
-    if !old_dir.join("traffic_history.db").exists()
-        || new_dir.join("traffic_history.db").exists()
-    {
+    if new_dir.join("traffic_history.db").exists() {
         return;
     }
-    let _ = std::fs::create_dir_all(new_dir);
-    for name in [
-        "traffic_history.db",
-        "traffic_history.db-wal",
-        "traffic_history.db-shm",
-    ] {
-        let _ = std::fs::copy(old_dir.join(name), new_dir.join(name));
+    let candidates: Vec<std::path::PathBuf> = [
+        std::env::var_os("APPDATA").map(|d| std::path::PathBuf::from(d).join("flowlens")),
+        std::env::var_os("APPDATA").map(|d| std::path::PathBuf::from(d).join("glassnet")),
+        std::env::var_os("HOME").map(|d| std::path::PathBuf::from(d).join(".local/share/flowlens")),
+        std::env::var_os("HOME").map(|d| std::path::PathBuf::from(d).join(".local/share/glassnet")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for old_dir in candidates {
+        if old_dir == new_dir || !old_dir.join("traffic_history.db").exists() {
+            continue;
+        }
+        let _ = std::fs::create_dir_all(new_dir);
+        for name in [
+            "traffic_history.db",
+            "traffic_history.db-wal",
+            "traffic_history.db-shm",
+        ] {
+            let _ = std::fs::copy(old_dir.join(name), new_dir.join(name));
+        }
+        eprintln!(
+            "[flowlens] migrated legacy database from {}",
+            old_dir.display()
+        );
+        return;
     }
-    eprintln!(
-        "[flowlens] migrated legacy database from {}",
-        old_dir.display()
-    );
 }
 
 fn default_db_path() -> Option<std::path::PathBuf> {
+    // FLOWLENS_DATA_DIR：数据目录覆盖（例如指到非系统盘）。空值视为未设置。
+    if let Some(dir) = std::env::var_os("FLOWLENS_DATA_DIR") {
+        if !dir.is_empty() {
+            return Some(std::path::PathBuf::from(dir).join("traffic_history.db"));
+        }
+    }
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("APPDATA").map(|d| {

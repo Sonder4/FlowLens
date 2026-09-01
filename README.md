@@ -50,7 +50,7 @@ npm run tauri dev
 
 ## 🗄️ 数据与隐私
 
-- 全部数据保存在本地 SQLite：`%APPDATA%\flowlens\traffic_history.db`，**无任何联网上传**
+- 全部数据保存在本地 SQLite，**无任何联网上传**。默认路径 `%APPDATA%/flowlens/traffic_history.db`；设置环境变量 `FLOWLENS_DATA_DIR` 可把数据目录指到其他磁盘（切换后首次启动自动迁移历史数据）
 - 分钟级明细与应用小时明细保留 90 天，天/月汇总与应用每日流量永久保留
 - 旧版（GlassNet）数据目录会在首次运行时自动迁移
 

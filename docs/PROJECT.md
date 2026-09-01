@@ -94,7 +94,7 @@ pcap 包 → 解析(etherparse) → 方向/族判定
   前端：traffic-tick（每设备每秒，含 flows top24）/ io-tick / capture-state
 ```
 
-### 4.3 数据库 Schema（`%APPDATA%\flowlens\traffic_history.db`）
+### 4.3 数据库 Schema（默认 `%APPDATA%/flowlens/traffic_history.db`）
 
 | 表 | 主键 | 字段 | 说明 |
 |---|---|---|---|
@@ -104,6 +104,8 @@ pcap 包 → 解析(etherparse) → 方向/族判定
 | traffic_app_hour | (hour, app, family) | rx_bytes, tx_bytes | hour=`YYYY-MM-DD HH:00`；**无门槛全量**；保留 90 天 |
 | traffic_app_day | (day, app, family) | rx_bytes, tx_bytes | 永久汇总；仅保留单日合计 ≥100MB 的应用 |
 | adapters | name | desc, first_seen | 预留（当前未写入） |
+
+数据目录可通过环境变量 `FLOWLENS_DATA_DIR` 覆盖（如指到非系统盘）；切换后的首次启动会自动从旧目录（`%APPDATA%/flowlens`、`%APPDATA%/glassnet`）整库迁移历史数据。 |
 
 ### 4.4 查询设计
 
