@@ -10,6 +10,9 @@
   let policyErr = $state(false);
   let busy = $state(false);
   let confirmMode = $state<string | null>(null);
+  let autostart = $state(false);
+  let autoBusy = $state(false);
+  let autoErr = $state("");
 
   onMount(async () => {
     // 等待后端 setup 完成（initState 幂等，主视图已调用过则直接返回）
@@ -17,7 +20,28 @@
     const list = await api.listDevices();
     devices = list.map((d) => ({ name: d.name, display: d.desc ?? d.name }));
     refreshPolicy();
+    refreshAutostart();
   });
+
+  async function refreshAutostart(): Promise<void> {
+    try {
+      autostart = await api.autostartStatus();
+    } catch {
+      autostart = false;
+    }
+  }
+
+  async function toggleAutostart(): Promise<void> {
+    autoBusy = true;
+    autoErr = "";
+    try {
+      await api.setAutostart(!autostart);
+      autostart = await api.autostartStatus();
+    } catch (e) {
+      autoErr = String(e);
+    }
+    autoBusy = false;
+  }
 
   async function refreshPolicy(): Promise<void> {
     policy = await api.ipv6PolicyStatus();
@@ -162,10 +186,26 @@
   </section>
 
   <section class="group">
+    <div class="group-title">启动</div>
+    <div class="item">
+      <span>开机自启</span>
+      <button class="btn" class:primary={autostart} disabled={autoBusy} onclick={() => toggleAutostart()}>
+        {autostart ? "已开启（点击关闭）" : "已关闭（点击开启）"}
+      </button>
+    </div>
+    {#if autoErr}<p class="hint err">{autoErr}</p>{/if}
+    <p class="hint">
+      开启后登录 Windows 时自动运行 FlowLens，并以静默方式启动到系统托盘（不弹窗口），
+      可随时从托盘图标打开主面板；对应注册表 HKCU\…\Run 下的 FlowLens 项。
+    </p>
+  </section>
+
+  <section class="group">
     <div class="group-title">数据</div>
     <p class="hint">
       流量历史按分钟落盘（保留 90 天），按天/月汇总永久保留；
-      数据库位于 %APPDATA%\flowlens\traffic_history.db。
+      默认数据库位于 %APPDATA%\flowlens\traffic_history.db，
+      可通过环境变量 FLOWLENS_DATA_DIR 将数据目录指到其他磁盘。
     </p>
   </section>
 
@@ -257,6 +297,11 @@
     border-color: rgba(215, 0, 21, 0.35);
   }
   .btn:disabled { opacity: 0.5; cursor: default; }
+  .btn.primary {
+    background: var(--accent-v4, #2f7cf6);
+    border-color: var(--accent-v4, #2f7cf6);
+    color: #fff;
+  }
   .foot {
     margin-top: auto;
     font-size: var(--fs-xs);

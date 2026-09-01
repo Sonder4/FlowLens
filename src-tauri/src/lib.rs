@@ -23,6 +23,74 @@ fn setup_done() -> bool {
     SETUP_DONE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// ── 开机自启：HKCU\...\Run 注册表项，值 = 当前 exe 路径 + --minimized ──
+#[cfg(target_os = "windows")]
+mod autostart {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE};
+    use winreg::RegKey;
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const VALUE_NAME: &str = "FlowLens";
+    const LAUNCH_ARG: &str = " --minimized";
+
+    /// 自启命令行：exe 路径加引号 + 静默启动参数
+    fn command_value() -> Option<String> {
+        let exe = std::env::current_exe().ok()?;
+        Some(format!("\"{}\"{}", exe.display(), LAUNCH_ARG))
+    }
+
+    /// 是否已启用：注册表项存在且指向当前 exe（exe 位置变更后视为未启用，重新开启即可覆盖）
+    pub fn status() -> bool {
+        let Some(expected) = command_value() else {
+            return false;
+        };
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(RUN_KEY)
+            .and_then(|k| k.get_value::<String, _>(VALUE_NAME))
+            .ok()
+            .map_or(false, |v| v == expected)
+    }
+
+    pub fn set(enable: bool) -> Result<(), String> {
+        let key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE | KEY_QUERY_VALUE)
+            .map_err(|e| e.to_string())?;
+        if enable {
+            let value = command_value().ok_or_else(|| "无法获取程序路径".to_string())?;
+            key.set_value(VALUE_NAME, &value).map_err(|e| e.to_string())
+        } else {
+            // 幂等：项不存在也视为成功
+            match key.delete_value(VALUE_NAME) {
+                Ok(()) => Ok(()),
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod autostart {
+    pub fn status() -> bool {
+        false
+    }
+    pub fn set(_enable: bool) -> Result<(), String> {
+        Err("仅支持 Windows".to_string())
+    }
+}
+
+/// 开机自启是否已开启
+#[tauri::command]
+fn autostart_status() -> bool {
+    autostart::status()
+}
+
+/// 开启/关闭开机自启（登录后静默启动到系统托盘）
+#[tauri::command]
+fn autostart_set(enable: bool) -> Result<(), String> {
+    autostart::set(enable)
+}
+
 #[tauri::command]
 fn list_devices() -> Vec<DeviceInfo> {
     capture::list_devices()
@@ -233,6 +301,17 @@ pub fn run() {
             );
             SETUP_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
 
+            // 开机自启（--minimized）：静默启动到系统托盘，不弹出任何窗口；
+            // 抓包已在上文自动恢复，托盘图标可随时唤出主面板
+            if std::env::args().any(|a| a == "--minimized") {
+                for label in ["main", "floating"] {
+                    if let Some(w) = app.get_webview_window(label) {
+                        let _ = w.hide();
+                    }
+                }
+                eprintln!("[flowlens] setup: minimized launch, windows hidden");
+            }
+
             // 系统托盘：左键点击 = 切换主面板；右键菜单 = 显示主面板/悬浮窗/退出
             use tauri::tray::{TrayIconBuilder, TrayIconEvent};
             let tray_show = tauri::menu::MenuItem::with_id(app, "tray_show", "显示主面板", true, None::<&str>)?;
@@ -286,6 +365,8 @@ pub fn run() {
             popup_floating_menu,
             show_window,
             hide_window,
+            autostart_status,
+            autostart_set,
         ])
         // 窗口关闭 = 最小化到托盘继续运行（真正退出请使用托盘菜单的「退出」）
         .on_window_event(|window, event| {

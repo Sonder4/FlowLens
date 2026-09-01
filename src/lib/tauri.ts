@@ -125,6 +125,8 @@ export const api = {
   ipv6PolicyStatus: () => invoke<PolicyStatus>("ipv6_policy_status"),
   setIpv6Policy: (mode: string) => invoke<string>("set_ipv6_policy", { mode }),
   restartAsAdmin: () => invoke<void>("restart_as_admin"),
+  autostartStatus: () => invoke<boolean>("autostart_status"),
+  setAutostart: (enable: boolean) => invoke<void>("autostart_set", { enable }),
 };
 
 export async function listen<T>(
