@@ -842,6 +842,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowlens"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "etherparse",
+ "pcap",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "windows 0.61.3",
+ "winreg",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1133,23 +1150,6 @@ dependencies = [
  "libc",
  "system-deps",
  "winapi",
-]
-
-[[package]]
-name = "glassnet"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "etherparse",
- "pcap",
- "rusqlite",
- "serde",
- "serde_json",
- "sysinfo",
- "tauri",
- "tauri-build",
- "windows 0.61.3",
- "winreg",
 ]
 
 [[package]]

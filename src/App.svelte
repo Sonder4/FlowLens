@@ -180,10 +180,10 @@
   <!-- 侧边栏 -->
   <aside class="sidebar glass" class:collapsed>
     <div class="logo">
-      <div class="logo-icon">G</div>
+      <div class="logo-icon">F</div>
       {#if !collapsed}
         <div>
-          <div class="logo-name">GlassNet</div>
+          <div class="logo-name">FlowLens</div>
           <div class="logo-sub">流量监控 · v0.1</div>
         </div>
       {/if}

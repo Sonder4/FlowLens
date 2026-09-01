@@ -1,5 +1,5 @@
 :root {
-  /* GlassNet design tokens (docs/code.html) */
+  /* FlowLens design tokens (docs/code.html) */
   --glass-bg: rgba(255, 255, 255, 0.60);
   --glass-bg-hover: rgba(255, 255, 255, 0.78);
   --glass-edge: rgba(255, 255, 255, 0.95);

@@ -1,4 +1,4 @@
-//! GlassNet backend: packet capture, persistent traffic history and
+//! FlowLens backend: packet capture, persistent traffic history and
 //! live adapter I/O, exposed to the Svelte frontend via commands and events.
 
 mod adapter_io;
@@ -56,7 +56,7 @@ fn set_ipv6_policy(mode: String) -> Result<String, String> {
     ip_policy::apply(&mode)
 }
 
-/// 触发 UAC 弹窗并以管理员权限重启 GlassNet。
+/// 触发 UAC 弹窗并以管理员权限重启 FlowLens。
 /// 用户在 UAC 中确认后，当前未提权实例自动退出；取消则保留当前实例并返回错误。
 #[tauri::command]
 fn restart_as_admin() -> Result<(), String> {
@@ -81,7 +81,7 @@ fn restart_as_admin() -> Result<(), String> {
             traffic_history::flush_now();
             std::process::exit(0);
         }
-        return Err("已取消 UAC 提权或启动失败，GlassNet 未重启".into());
+        return Err("已取消 UAC 提权或启动失败，FlowLens 未重启".into());
     }
     #[cfg(not(target_os = "windows"))]
     Err("仅 Windows 支持 UAC 提权重启".into())
@@ -149,7 +149,7 @@ fn history(granularity: String, adapter: Option<String>) -> Vec<HistBucket> {
         _ => Granularity::Hourly,
     };
     let result = traffic_history::query(granularity, adapter.as_deref());
-    eprintln!("[glassnet] history -> {} buckets", result.len());
+    eprintln!("[flowlens] history -> {} buckets", result.len());
     result
 }
 
@@ -219,16 +219,16 @@ fn hide_window(app: AppHandle, label: String) {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            eprintln!("[glassnet] setup: begin");
+            eprintln!("[flowlens] setup: begin");
             traffic_history::init();
-            eprintln!("[glassnet] setup: history ready");
+            eprintln!("[flowlens] setup: history ready");
             port_map::spawn_refresher();
             software::spawn_refresher();
             adapter_io::spawn_emitter(app.handle().clone());
             // resume capturing all adapters automatically
             capture::start(app.handle(), None);
             eprintln!(
-                "[glassnet] setup: capture running={}",
+                "[flowlens] setup: capture running={}",
                 capture::is_running()
             );
             SETUP_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -269,7 +269,7 @@ pub fn run() {
             _ => {}
         })
         .build(tauri::generate_context!())
-        .expect("error while building GlassNet")
+        .expect("error while building FlowLens")
         .run(|_app, event| {
             // 退出前把内存中未落盘的流量（含应用每日累计）写入数据库
             if matches!(event, tauri::RunEvent::Exit) {

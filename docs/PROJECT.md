@@ -1,11 +1,11 @@
-# GlassNet 项目文档
+# FlowLens 项目文档
 
 > 本机网络流量监控工具 · 桌面常驻 · 长周期运行
-> 文档版本：2026-09-01（对应提交 77b8052 之后的代码状态）
+> 文档版本：2026-09-01
 
 ## 1. 项目背景与用户需求
 
-GlassNet 是一款 Windows 本机流量监控工具，源于"基于 Sniffnet 二次开发本机流量监控工具"的原始规划，实际演进为独立实现（Tauri 2 自建架构，保留 Sniffnet 式 pcap 抓包思路）。
+FlowLens 是一款 Windows 本机流量监控工具，源于"基于 Sniffnet 二次开发本机流量监控工具"的原始规划，实际演进为独立实现（Tauri 2 自建架构，保留 Sniffnet 式 pcap 抓包思路）。
 
 ### 1.1 原始需求（已全部落地）
 - 监控本机 WiFi / 有线 / VPN 网卡流量，按 **网卡 × IPv4/IPv6 × 收/发方向** 区分统计
@@ -43,7 +43,7 @@ GlassNet 是一款 Windows 本机流量监控工具，源于"基于 Sniffnet 二
 | 历史记录 | **任意时间范围**（今天/昨天/近24小时/近7天/近30天/本月/自定义）流量趋势图（自动小时/天粒度）；范围内**应用流量明细**（四分类徽标 + 筛选 + 小计）；**四类流量汇总卡**；应用每日流量永久汇总表（>100MB 门槛） |
 | 设置 | 捕获范围、IP 协议策略（v4/v6 优先级，支持 UAC 提权 netsh）、窗口显示、数据说明 |
 | 悬浮窗 | 常驻迷你网速窗（置顶、跳过任务栏、原生右键菜单） |
-| 系统集成 | NSIS 安装包 / 便携版；数据存 `%APPDATA%\glassnet`；开机抓包自动恢复 |
+| 系统集成 | NSIS 安装包 / 便携版；数据存 `%APPDATA%\flowlens`；开机抓包自动恢复 |
 
 ## 3. 技术栈
 
@@ -94,7 +94,7 @@ pcap 包 → 解析(etherparse) → 方向/族判定
   前端：traffic-tick（每设备每秒，含 flows top24）/ io-tick / capture-state
 ```
 
-### 4.3 数据库 Schema（`%APPDATA%\glassnet\traffic_history.db`）
+### 4.3 数据库 Schema（`%APPDATA%\flowlens\traffic_history.db`）
 
 | 表 | 主键 | 字段 | 说明 |
 |---|---|---|---|
@@ -135,10 +135,10 @@ pcap 包 → 解析(etherparse) → 方向/族判定
 
 ## 6. 打包与部署
 
-- `npx tauri build` → release 便携 exe + `bundle/nsis/GlassNet_0.1.0_x64-setup.exe`
-- 桌面交付目录 `E:\Desktop\GlassNet\`：GlassNet.exe（便携）+ 安装包/ + 使用说明.md
+- `npx tauri build` → release 便携 exe + `bundle/nsis/FlowLens_0.1.0_x64-setup.exe`
+- 交付目录：FlowLens.exe（便携版）+ 安装包 + 使用说明.md
 - NSIS 工具链需 GitHub 下载（tauri 内置超时短，必要时手动下载至 `%LOCALAPPDATA%\tauri\NSIS`，插件 DLL 需 SHA1 校验 `75197FEE…`）
-- 源码仓库：`E:\Desktop\日常\netmeter`（glassnet/ 为应用，仓库根为 Sniffnet fork 骨架）
+- 源码仓库：github.com/Sonder4/FlowLens（MIT 开源）
 
 ## 7. 已知限制与后续方向
 

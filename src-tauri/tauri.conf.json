@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "GlassNet",
+  "productName": "FlowLens",
   "version": "0.1.0",
-  "identifier": "com.glassnet.app",
+  "identifier": "com.flowlens.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "GlassNet — 网络流量监控",
+        "title": "FlowLens — 网络流量监控",
         "url": "dashboard.html",
         "width": 1280,
         "height": 820,
@@ -30,7 +30,7 @@
       },
       {
         "label": "floating",
-        "title": "GlassNet",
+        "title": "FlowLens",
         "url": "floating.html",
         "width": 150,
         "height": 76,
@@ -45,7 +45,7 @@
       },
       {
         "label": "settings",
-        "title": "GlassNet 设置",
+        "title": "FlowLens 设置",
         "url": "settings.html",
         "width": 440,
         "height": 600,

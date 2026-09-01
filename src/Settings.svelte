@@ -141,7 +141,7 @@
       IPv6-only / IPv4-only：禁用活动无线网卡的对应协议绑定，可能中断当前连接，需重新连接 Wi-Fi，
       IPv4-only 网站在 IPv6-only 下将无法访问。
       {#if policy && !policy.elevated}
-        当前未以管理员运行：点击策略按钮会先弹出 UAC 提权确认，确认后 GlassNet
+        当前未以管理员运行：点击策略按钮会先弹出 UAC 提权确认，确认后 FlowLens
         将关闭并以管理员身份重新启动（取消 UAC 则保持现状）；也可以直接点击上方「以管理员身份重启」。
       {:else}
         修改需要管理员权限。
@@ -165,11 +165,11 @@
     <div class="group-title">数据</div>
     <p class="hint">
       流量历史按分钟落盘（保留 90 天），按天/月汇总永久保留；
-      数据库位于 %APPDATA%\glassnet\traffic_history.db。
+      数据库位于 %APPDATA%\flowlens\traffic_history.db。
     </p>
   </section>
 
-  <footer class="foot">GlassNet v0.1 · 基于 Sniffnet 二次开发 · MIT/Apache-2.0</footer>
+  <footer class="foot">FlowLens v0.1 · 开源 · MIT</footer>
 </div>
 
 <style>

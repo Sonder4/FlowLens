@@ -630,7 +630,7 @@ pub fn init_at(path: &Path) {
             }
         }
         Err(e) => {
-            eprintln!("Sniffnet error: could not open traffic history database: {e}");
+            eprintln!("FlowLens error: could not open traffic history database: {e}");
         }
     }
 }
@@ -638,13 +638,45 @@ pub fn init_at(path: &Path) {
 /// Initializes the global store at its default location, next to the app config file.
 pub fn init() {
     let Some(path) = default_db_path() else {
-        eprintln!("Sniffnet error: could not resolve traffic history database path");
+        eprintln!("FlowLens error: could not resolve traffic history database path");
         return;
     };
     if let Some(parent) = path.parent() {
+        migrate_legacy_data_dir(parent);
         let _ = std::fs::create_dir_all(parent);
     }
     init_at(&path);
+}
+
+/// 旧版数据目录一次性迁移（glassnet → flowlens）：新目录尚无数据库且旧库
+/// 存在时，整库拷贝（db/wal/shm），保留用户全部历史数据。
+fn migrate_legacy_data_dir(new_dir: &Path) {
+    #[cfg(target_os = "windows")]
+    let legacy = std::env::var_os("APPDATA")
+        .map(|d| std::path::PathBuf::from(d).join("glassnet"));
+    #[cfg(not(target_os = "windows"))]
+    let legacy = std::env::var_os("HOME")
+        .map(|d| std::path::PathBuf::from(d).join(".local/share/glassnet"));
+    let Some(old_dir) = legacy else {
+        return;
+    };
+    if !old_dir.join("traffic_history.db").exists()
+        || new_dir.join("traffic_history.db").exists()
+    {
+        return;
+    }
+    let _ = std::fs::create_dir_all(new_dir);
+    for name in [
+        "traffic_history.db",
+        "traffic_history.db-wal",
+        "traffic_history.db-shm",
+    ] {
+        let _ = std::fs::copy(old_dir.join(name), new_dir.join(name));
+    }
+    eprintln!(
+        "[flowlens] migrated legacy database from {}",
+        old_dir.display()
+    );
 }
 
 fn default_db_path() -> Option<std::path::PathBuf> {
@@ -652,7 +684,7 @@ fn default_db_path() -> Option<std::path::PathBuf> {
     {
         std::env::var_os("APPDATA").map(|d| {
             std::path::PathBuf::from(d)
-                .join("glassnet")
+                .join("flowlens")
                 .join("traffic_history.db")
         })
     }
@@ -660,7 +692,7 @@ fn default_db_path() -> Option<std::path::PathBuf> {
     {
         std::env::var_os("HOME").map(|d| {
             std::path::PathBuf::from(d)
-                .join(".local/share/glassnet/traffic_history.db")
+                .join(".local/share/flowlens/traffic_history.db")
         })
     }
 }
@@ -674,7 +706,7 @@ fn spawn_flusher() {
                 if let Some(store) = STORE.get() {
                     // soft logging only: the flusher must never take the app down
                     if let Err(e) = store.flush() {
-                        eprintln!("Sniffnet error: traffic history flush failed: {e}");
+                        eprintln!("FlowLens error: traffic history flush failed: {e}");
                     }
                 }
             }
@@ -730,7 +762,7 @@ pub fn query_app_range(since_ts: i64, until_ts: i64) -> Vec<AppUsageRow> {
 pub fn flush_now() {
     if let Some(store) = STORE.get() {
         if let Err(e) = store.flush() {
-            eprintln!("Sniffnet error: traffic history flush on exit failed: {e}");
+            eprintln!("FlowLens error: traffic history flush on exit failed: {e}");
         }
     }
 }

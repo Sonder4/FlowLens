@@ -1,11 +1,11 @@
 [package]
-name = "glassnet"
+name = "flowlens"
 version = "0.1.0"
 edition = "2021"
-description = "GlassNet — liquid glass network traffic monitor"
+description = "FlowLens — liquid glass network traffic monitor"
 
 [lib]
-name = "glassnet_lib"
+name = "flowlens_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

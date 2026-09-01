@@ -133,7 +133,7 @@ fn first_line(s: &str) -> &str {
 #[cfg(windows)]
 pub fn apply(mode: &str) -> Result<String, String> {
     if !is_elevated() {
-        return Err("需要管理员权限：请以管理员身份运行 GlassNet 后再设置 IP 协议策略。".into());
+        return Err("需要管理员权限：请以管理员身份运行 FlowLens 后再设置 IP 协议策略。".into());
     }
     match mode {
         "prefer_ipv6" => {
