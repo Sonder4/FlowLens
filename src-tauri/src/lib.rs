@@ -232,6 +232,39 @@ pub fn run() {
                 capture::is_running()
             );
             SETUP_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            // 系统托盘：左键点击 = 切换主面板；右键菜单 = 显示主面板/悬浮窗/退出
+            use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+            let tray_show = tauri::menu::MenuItem::with_id(app, "tray_show", "显示主面板", true, None::<&str>)?;
+            let tray_float = tauri::menu::MenuItem::with_id(app, "tray_float", "显示悬浮窗", true, None::<&str>)?;
+            let tray_quit = tauri::menu::MenuItem::with_id(app, "tray_quit", "退出", true, None::<&str>)?;
+            let tray_menu = tauri::menu::Menu::with_items(app, &[&tray_show, &tray_float, &tray_quit])?;
+            let _tray = TrayIconBuilder::with_id("flowlens-tray")
+                .icon(app.default_window_icon().expect("missing window icon").clone())
+                .tooltip("FlowLens — 网络流量监控")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(w) = app.get_webview_window("main") {
+                            if w.is_visible().unwrap_or(false) {
+                                let _ = w.hide();
+                            } else {
+                                let _ = w.unminimize();
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -254,7 +287,27 @@ pub fn run() {
             show_window,
             hide_window,
         ])
+        // 窗口关闭 = 最小化到托盘继续运行（真正退出请使用托盘菜单的「退出」）
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray_show" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            "tray_float" => {
+                if let Some(w) = app.get_webview_window("floating") {
+                    let _ = w.show();
+                }
+            }
+            "tray_quit" => app.exit(0),
             "gm_open" => {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();
