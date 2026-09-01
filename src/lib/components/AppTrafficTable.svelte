@@ -10,6 +10,43 @@
 
   let expanded = $state(false);
 
+  type SortKey = "total" | "name" | "v4" | "v6" | "rx" | "tx";
+  let sortKey: SortKey = $state("total");
+  let sortDir: "asc" | "desc" = $state("desc");
+
+  // 列标题可点击切换排序；↓/↑ 在标签中表示 下行/上行，排序指示用 ▼/▲
+  const COLS: { key: SortKey; label: string }[] = [
+    { key: "name", label: "应用 / 进程" },
+    { key: "v4", label: "IPv4 ↓/↑" },
+    { key: "v6", label: "IPv6 ↓/↑" },
+    { key: "rx", label: "合计 ↓" },
+    { key: "tx", label: "合计 ↑" },
+  ];
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      sortDir = sortDir === "desc" ? "asc" : "desc";
+    } else {
+      sortKey = key;
+      sortDir = key === "name" ? "asc" : "desc";
+    }
+  }
+
+  const valOf = (a: AppStat): number => {
+    switch (sortKey) {
+      case "v4":
+        return a.rxV4 + a.txV4;
+      case "v6":
+        return a.rxV6 + a.txV6;
+      case "rx":
+        return a.rxV4 + a.rxV6;
+      case "tx":
+        return a.txV4 + a.txV6;
+      default:
+        return a.rxV4 + a.txV4 + a.rxV6 + a.txV6;
+    }
+  };
+
   interface AppStat {
     program: string;
     rxV4: number;
@@ -36,10 +73,12 @@
       }
       map.set(f.program, e);
     }
+    const m = sortDir === "asc" ? 1 : -1;
     return [...map.values()]
-      .sort(
-        (a, b) =>
-          b.rxV4 + b.txV4 + b.rxV6 + b.txV6 - (a.rxV4 + a.txV4 + a.rxV6 + a.txV6),
+      .sort((a, b) =>
+        sortKey === "name"
+          ? m * a.program.localeCompare(b.program)
+          : m * (valOf(a) - valOf(b)),
       )
       .slice(0, rows);
   });
@@ -56,11 +95,20 @@
   <table>
     <thead>
       <tr>
-        <th>应用 / 进程</th>
-        <th class="r">IPv4 ↓/↑</th>
-        <th class="r">IPv6 ↓/↑</th>
-        <th class="r">合计 ↓</th>
-        <th class="r">合计 ↑</th>
+        {#each COLS as c (c.key)}
+          <th class={c.key === "name" ? "" : "r"}>
+            <button
+              class="sort"
+              class:active={sortKey === c.key}
+              title="点击按「{c.label}」排序，再次点击切换升 / 降序"
+              onclick={() => toggleSort(c.key)}
+            >
+              {c.label}{#if sortKey === c.key}&nbsp;<span class="arrow"
+                  >{sortDir === "asc" ? "▲" : "▼"}</span
+                >{/if}
+            </button>
+          </th>
+        {/each}
       </tr>
     </thead>
     <tbody>
@@ -103,6 +151,7 @@
     </tbody>
   </table>
   <p class="note">
+    点击列标题可切换排序（默认按总流量降序，再点同列切换升序）。
     「其他」= 建立统计瞬间无法通过系统端口表归属到进程的流量：多为已关闭的 UDP 短连接、
     系统内核级流量，或刚建立尚未注册端口的连接（后台每秒重试归属，归属成功会自动改名）。
     svchost 承载的系统服务已归属到具体服务名（svchost:服务名）。
@@ -127,6 +176,18 @@
     padding: 4px 10px 6px 0;
     border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   }
+  .sort {
+    border: none;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    padding: 0;
+    transition: color 0.15s ease;
+  }
+  .sort:hover { color: var(--text-primary); }
+  .sort.active { color: var(--text-secondary); font-weight: 600; }
+  .sort .arrow { color: var(--accent-v4); font-size: 0.85em; }
   td {
     padding: 6px 10px 6px 0;
     border-bottom: 1px solid rgba(0, 0, 0, 0.04);

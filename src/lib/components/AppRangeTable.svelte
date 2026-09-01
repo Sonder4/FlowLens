@@ -45,7 +45,51 @@
     return { rxV4, txV4, rxV6, txV6 };
   });
 
-  const totalOf = (r: AppRangeRow): number => r.rxV4 + r.txV4 + r.rxV6 + r.txV6;
+  type SortKey = "total" | "name" | "v4" | "v6" | "rx" | "tx";
+  let sortKey: SortKey = $state("total");
+  let sortDir: "asc" | "desc" = $state("desc");
+
+  // 列标题可点击切换排序；↓/↑ 在标签中表示 下行/上行，排序指示用 ▼/▲
+  const COLS: { key: SortKey; label: string }[] = [
+    { key: "name", label: "应用 / 进程" },
+    { key: "v4", label: "IPv4 ↓/↑" },
+    { key: "v6", label: "IPv6 ↓/↑" },
+    { key: "rx", label: "合计 ↓" },
+    { key: "tx", label: "合计 ↑" },
+  ];
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      sortDir = sortDir === "desc" ? "asc" : "desc";
+    } else {
+      sortKey = key;
+      sortDir = key === "name" ? "asc" : "desc";
+    }
+  }
+
+  const valOf = (r: AppRangeRow): number => {
+    switch (sortKey) {
+      case "v4":
+        return r.rxV4 + r.txV4;
+      case "v6":
+        return r.rxV6 + r.txV6;
+      case "rx":
+        return r.rxV4 + r.rxV6;
+      case "tx":
+        return r.txV4 + r.txV6;
+      default:
+        return r.rxV4 + r.txV4 + r.rxV6 + r.txV6;
+    }
+  };
+
+  const sorted = $derived.by(() => {
+    const m = sortDir === "asc" ? 1 : -1;
+    return [...filtered].sort((a, b) =>
+      sortKey === "name"
+        ? m * a.app.localeCompare(b.app)
+        : m * (valOf(a) - valOf(b)),
+    );
+  });
 </script>
 
 <div class="table-wrap">
@@ -59,15 +103,24 @@
     <thead>
       <tr>
         <th>分类</th>
-        <th>应用 / 进程</th>
-        <th class="r">IPv4 ↓/↑</th>
-        <th class="r">IPv6 ↓/↑</th>
-        <th class="r">合计 ↓</th>
-        <th class="r">合计 ↑</th>
+        {#each COLS as c (c.key)}
+          <th class={c.key === "name" ? "" : "r"}>
+            <button
+              class="sort"
+              class:active={sortKey === c.key}
+              title="点击按「{c.label}」排序，再次点击切换升 / 降序"
+              onclick={() => toggleSort(c.key)}
+            >
+              {c.label}{#if sortKey === c.key}&nbsp;<span class="arrow"
+                  >{sortDir === "asc" ? "▲" : "▼"}</span
+                >{/if}
+            </button>
+          </th>
+        {/each}
       </tr>
     </thead>
     <tbody>
-      {#each filtered as r (r.app)}
+      {#each sorted as r (r.app)}
         <tr>
           <td><span class="badge {r.category}">{catLabel[r.category]}</span></td>
           <td class="prog">{r.app}</td>
@@ -97,6 +150,7 @@
     {/if}
   </table>
   <p class="note">
+    点击列标题可切换排序（默认按总流量降序，再点同列切换升序）。
     分类说明：<b>系统</b> = Windows 自身（svchost 服务、系统更新、Defender 等系统进程）；
     <b>软件</b> = 已安装应用（Edge、微信等，按安装目录与产品名匹配）；
     <b>开发</b> = 开发工具链（node / npm / git / cargo / python 等产生的下载与拉取流量）；
@@ -144,6 +198,18 @@
     padding: 4px 10px 6px 0;
     border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   }
+  .sort {
+    border: none;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    padding: 0;
+    transition: color 0.15s ease;
+  }
+  .sort:hover { color: var(--text-primary); }
+  .sort.active { color: var(--text-secondary); font-weight: 600; }
+  .sort .arrow { color: var(--accent-v4); font-size: 0.85em; }
   td {
     padding: 6px 10px 6px 0;
     border-bottom: 1px solid rgba(0, 0, 0, 0.04);
