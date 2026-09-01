@@ -5,6 +5,7 @@ mod adapter_io;
 mod capture;
 mod ip_policy;
 mod port_map;
+mod software;
 mod traffic_history;
 
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -97,6 +98,49 @@ fn io_snapshot() -> Vec<adapter_io::AdapterIo> {
     adapter_io::snapshot()
 }
 
+/// 任意时间范围的总流量序列（后端按跨度自动选小时/天桶）
+#[tauri::command]
+fn history_range(
+    since: i64,
+    until: i64,
+    adapter: Option<String>,
+) -> Option<traffic_history::RangeSeries> {
+    traffic_history::query_range(since, until, adapter.as_deref())
+}
+
+/// 任意时间范围内按应用的流量聚合（附带 分类 标记）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppCategoryRow {
+    app: String,
+    category: &'static str,
+    rx_v4: u64,
+    tx_v4: u64,
+    rx_v6: u64,
+    tx_v6: u64,
+}
+
+#[tauri::command]
+fn history_app_range(since: i64, until: i64) -> Vec<AppCategoryRow> {
+    traffic_history::query_app_range(since, until)
+        .into_iter()
+        .map(|r| AppCategoryRow {
+            category: software::categorize(&r.app),
+            app: r.app,
+            rx_v4: r.rx_v4,
+            tx_v4: r.tx_v4,
+            rx_v6: r.rx_v6,
+            tx_v6: r.tx_v6,
+        })
+        .collect()
+}
+
+/// 已安装软件目录（注册表 Uninstall 键枚举，启动时加载并每日刷新）
+#[tauri::command]
+fn list_installed_apps() -> Vec<software::InstalledApp> {
+    software::installed_apps()
+}
+
 #[tauri::command]
 fn history(granularity: String, adapter: Option<String>) -> Vec<HistBucket> {
     let granularity = match granularity.as_str() {
@@ -179,6 +223,7 @@ pub fn run() {
             traffic_history::init();
             eprintln!("[glassnet] setup: history ready");
             port_map::spawn_refresher();
+            software::spawn_refresher();
             adapter_io::spawn_emitter(app.handle().clone());
             // resume capturing all adapters automatically
             capture::start(app.handle(), None);
@@ -200,6 +245,9 @@ pub fn run() {
             io_snapshot,
             history,
             history_app_day,
+            history_range,
+            history_app_range,
+            list_installed_apps,
             setup_done,
             local_addresses,
             popup_floating_menu,

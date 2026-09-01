@@ -11,4 +11,4 @@ pub use store::{
     flush_now, init, query, query_app_days, query_app_range, query_range, record,
     record_app_totals,
 };
-pub use types::{AppDayRow, AppUsageRow, Dir, Family, Granularity, HistBucket, RangeSeries};
+pub use types::{AppDayRow, Dir, Family, Granularity, HistBucket, RangeSeries};
