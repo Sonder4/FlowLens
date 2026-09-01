@@ -15,3 +15,6 @@ dist/
 # 系统杂项
 .DS_Store
 Thumbs.db
+
+# 本地构建配置（含机器专属的 npcap SDK 路径，不入库）
+.cargo/
