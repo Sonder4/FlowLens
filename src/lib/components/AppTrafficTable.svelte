@@ -129,7 +129,7 @@
           <td class="r num tx">{fmtBytes(a.txV4 + a.txV6)}</td>
         </tr>
         {#if a.program === "其他" && expanded}
-          {#each others.slice(0, 8) as f (f.device + f.remote + f.remotePort + f.localPort + f.proto)}
+          {#each others.slice(0, 8) as f (f.device + f.family + f.remote + f.remotePort + f.localPort + f.proto)}
             <tr class="detail">
               <td class="dim">{f.proto} · {f.family === "v4" ? "IPv4" : "IPv6"} · {f.device}</td>
               <td class="addr num" colspan="2">{f.remote}:{f.remotePort}</td>

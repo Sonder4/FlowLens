@@ -29,10 +29,17 @@
 
   const deviceDisplay: Record<string, string> = $state({});
 
-  const segmentItems = $derived([
-    { key: null, label: "全部" },
-    ...devices.map((d) => ({ key: d.display, label: shorten(d.display) })),
-  ]);
+  const segmentItems = $derived.by(() => {
+    const items: { key: string | null; label: string }[] = [{ key: null, label: "全部" }];
+    // 两块网卡描述可能相同（如多块 TAP）：同键只保留首个，避免键控循环重复键崩溃
+    const seen = new Set<string>();
+    for (const d of devices) {
+      if (seen.has(d.display)) continue;
+      seen.add(d.display);
+      items.push({ key: d.display, label: shorten(d.display) });
+    }
+    return items;
+  });
 
   function shorten(name: string): string {
     if (/wi-?fi|wlan|802\.11/i.test(name)) return "Wi-Fi";

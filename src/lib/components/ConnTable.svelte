@@ -27,7 +27,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each flows.slice(0, rows) as f (f.remote + f.remotePort + f.localPort + f.proto)}
+        {#each flows.slice(0, rows) as f (f.device + f.family + f.remote + f.remotePort + f.localPort + f.proto)}
           <tr>
             <td class="prog">{f.program}</td>
             <td class="pcol">

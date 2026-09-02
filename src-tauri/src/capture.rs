@@ -56,6 +56,9 @@ fn is_noise_device(desc: &str) -> bool {
 }
 
 pub fn list_devices() -> Vec<DeviceInfo> {
+    // 描述相同的网卡（多块 TAP / 虚拟网卡重命名前后）只保留首个：
+    // 前端以 display 作为设备标识与列表键，重复会导致键控循环崩溃
+    let mut seen = std::collections::HashSet::new();
     pcap::Device::list()
         .unwrap_or_default()
         .into_iter()
@@ -66,6 +69,7 @@ pub fn list_devices() -> Vec<DeviceInfo> {
         })
         .filter(|d| !d.addresses.is_empty())
         .filter(|d| !is_noise_device(&d.display()))
+        .filter(|d| seen.insert(d.display()))
         .collect()
 }
 
