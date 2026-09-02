@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "FlowLens — 网络流量监控",
         "url": "dashboard.html",
         "width": 1280,
@@ -31,6 +32,7 @@
       },
       {
         "label": "floating",
+        "create": false,
         "title": "FlowLens",
         "url": "floating.html",
         "width": 150,
@@ -47,6 +49,7 @@
       },
       {
         "label": "settings",
+        "create": false,
         "title": "FlowLens 设置",
         "url": "settings.html",
         "width": 440,

@@ -1,0 +1,25 @@
+[[permission]]
+identifier = "allow-flowlens-ui"
+description = "Allows the bundled FlowLens interface to invoke application commands."
+commands.allow = [
+  "list_devices",
+  "start_capture",
+  "stop_capture",
+  "capture_running",
+  "ipv6_policy_status",
+  "set_ipv6_policy",
+  "restart_as_admin",
+  "io_snapshot",
+  "history",
+  "history_app_day",
+  "history_range",
+  "history_app_range",
+  "list_installed_apps",
+  "setup_done",
+  "local_addresses",
+  "popup_floating_menu",
+  "show_window",
+  "hide_window",
+  "autostart_status",
+  "autostart_set",
+]

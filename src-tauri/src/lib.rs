@@ -3,6 +3,7 @@
 
 mod adapter_io;
 mod capture;
+mod embedded_assets_server;
 mod ip_policy;
 mod port_map;
 mod software;
@@ -283,6 +284,39 @@ fn hide_window(app: AppHandle, label: String) {
     }
 }
 
+/// Release builds use a real private loopback HTTP server for the bundled UI.
+/// WebView2 then has no dependency on the unreliable tauri.localhost request hook.
+fn create_frontend_windows(app: &tauri::App<tauri::Wry>) -> tauri::Result<()> {
+    #[cfg(debug_assertions)]
+    let frontend_base = app
+        .config()
+        .build
+        .dev_url
+        .as_ref()
+        .expect("dev builds require build.devUrl")
+        .as_str()
+        .trim_end_matches('/')
+        .to_string();
+
+    #[cfg(not(debug_assertions))]
+    let frontend_base = embedded_assets_server::EmbeddedAssetsServer::start(app.handle())?
+        .url_for("")
+        .trim_end_matches('/')
+        .to_string();
+
+    for configured_window in &app.config().app.windows {
+        let mut window = configured_window.clone();
+        let tauri::WebviewUrl::App(asset_path) = &window.url else {
+            continue;
+        };
+        let url = format!("{frontend_base}/{}", asset_path.to_string_lossy());
+        window.url = tauri::WebviewUrl::External(url.parse().expect("valid frontend URL"));
+        tauri::WebviewWindowBuilder::from_config(app.handle(), &window)?.build()?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -297,6 +331,7 @@ pub fn run() {
         }))
         .setup(|app| {
             eprintln!("[flowlens] setup: begin");
+            create_frontend_windows(app)?;
             traffic_history::init();
             eprintln!("[flowlens] setup: history ready");
             port_map::spawn_refresher();
