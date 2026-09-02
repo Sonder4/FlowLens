@@ -286,6 +286,15 @@ fn hide_window(app: AppHandle, label: String) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例：应用已运行时再次双击 exe，不再起第二个进程，
+        // 而是唤出已运行实例的主面板（否则用户会以为程序没打开）
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .setup(|app| {
             eprintln!("[flowlens] setup: begin");
             traffic_history::init();
@@ -301,15 +310,14 @@ pub fn run() {
             );
             SETUP_DONE.store(true, std::sync::atomic::Ordering::Relaxed);
 
-            // 开机自启（--minimized）：静默启动到系统托盘，不弹出任何窗口；
-            // 抓包已在上文自动恢复，托盘图标可随时唤出主面板
+            // 开机自启（--minimized）：主面板隐藏到托盘，抓包已在上文自动恢复；
+            // 悬浮窗保留显示，作为"应用已在运行"的可见提示
+            //（用户在设置中关闭悬浮窗时，其前端加载后会自行隐藏）
             if std::env::args().any(|a| a == "--minimized") {
-                for label in ["main", "floating"] {
-                    if let Some(w) = app.get_webview_window(label) {
-                        let _ = w.hide();
-                    }
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
                 }
-                eprintln!("[flowlens] setup: minimized launch, windows hidden");
+                eprintln!("[flowlens] setup: minimized launch, main hidden");
             }
 
             // 系统托盘：左键点击 = 切换主面板；右键菜单 = 显示主面板/悬浮窗/退出
