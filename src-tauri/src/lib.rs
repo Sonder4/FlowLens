@@ -299,10 +299,11 @@ fn create_frontend_windows(app: &tauri::App<tauri::Wry>) -> tauri::Result<()> {
         .to_string();
 
     #[cfg(not(debug_assertions))]
-    let frontend_base = embedded_assets_server::EmbeddedAssetsServer::start(app.handle())?
-        .url_for("")
-        .trim_end_matches('/')
-        .to_string();
+    let frontend_base = {
+        let assets_server = embedded_assets_server::EmbeddedAssetsServer::start(app.handle())?;
+        authorize_embedded_frontend(app, assets_server.url_pattern())?;
+        assets_server.url_for("").trim_end_matches('/').to_string()
+    };
 
     for configured_window in &app.config().app.windows {
         let mut window = configured_window.clone();
@@ -315,6 +316,25 @@ fn create_frontend_windows(app: &tauri::App<tauri::Wry>) -> tauri::Result<()> {
     }
 
     Ok(())
+}
+
+/// The random loopback origin is known only after binding the listener.
+/// Register it at runtime so Tauri authorizes exactly this app instance.
+#[cfg(not(debug_assertions))]
+fn authorize_embedded_frontend(app: &tauri::App<tauri::Wry>, url_pattern: String) -> tauri::Result<()> {
+    app.add_capability(
+        tauri::ipc::CapabilityBuilder::new("embedded-ui")
+            .remote(url_pattern)
+            .windows(["main", "floating", "settings"])
+            .permission("allow-flowlens-ui")
+            .permission("core:default")
+            .permission("core:window:default")
+            .permission("core:event:default")
+            .permission("core:window:allow-start-dragging")
+            .permission("core:window:allow-show")
+            .permission("core:window:allow-hide")
+            .permission("core:window:allow-set-focus"),
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

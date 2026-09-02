@@ -35,6 +35,10 @@ impl EmbeddedAssetsServer {
     pub fn url_for(&self, asset_path: &str) -> String {
         format!("http://127.0.0.1:{}/{}", self.port, asset_path)
     }
+
+    pub fn url_pattern(&self) -> String {
+        format!("http://127.0.0.1:{}/*", self.port)
+    }
 }
 
 #[cfg(not(debug_assertions))]
@@ -176,10 +180,12 @@ mod tests {
     }
 
     #[test]
-    fn matches_random_loopback_port() {
-        let pattern = RemoteUrlPattern::from_str("http://127.0.0.1:*").unwrap();
+    fn matches_only_its_loopback_port() {
+        let pattern = RemoteUrlPattern::from_str("http://127.0.0.1:52923/*").unwrap();
         let url = "http://127.0.0.1:52923/dashboard.html".parse().unwrap();
+        let other_port = "http://127.0.0.1:52924/dashboard.html".parse().unwrap();
 
         assert!(pattern.test(&url));
+        assert!(!pattern.test(&other_port));
     }
 }
