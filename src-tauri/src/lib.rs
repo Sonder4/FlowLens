@@ -18,10 +18,52 @@ use traffic_history::{Granularity, HistBucket};
 
 static SETUP_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// ── 前端心跳看门狗：WebView2 偶发加载失败（窗口显示连接拒绝错误页）时自愈。
+// 各窗口前端每 2s 上报心跳；看门狗发现某窗口心跳停滞，就记录当时的真实 URL
+// （用于事后定位根因）并重新导航到内嵌资源服务器。多次失败则退避到 5 分钟一次。
+static FRONTEND_BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+struct FrontendLiveness {
+    last_beat: std::time::Instant,
+    reloads: u32,
+    last_reload: Option<std::time::Instant>,
+}
+
+impl FrontendLiveness {
+    fn fresh() -> Self {
+        Self {
+            last_beat: std::time::Instant::now(),
+            reloads: 0,
+            last_reload: None,
+        }
+    }
+}
+
+static LIVENESS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, FrontendLiveness>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+const FRONTEND_PAGES: &[(&str, &str)] = &[
+    ("main", "dashboard.html"),
+    ("floating", "floating.html"),
+    ("settings", "settings.html"),
+];
+
 /// 前端初始化前等待后端 setup 完成，避免查询与事件在初始化前竞态
 #[tauri::command]
 fn setup_done() -> bool {
     SETUP_DONE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 前端各窗口的心跳上报（由 initialization_script 注入的定时器调用）
+#[tauri::command]
+fn frontend_heartbeat(label: String) {
+    if let Ok(mut map) = LIVENESS.lock() {
+        let entry = map.entry(label).or_insert_with(FrontendLiveness::fresh);
+        entry.last_beat = std::time::Instant::now();
+        entry.reloads = 0;
+        entry.last_reload = None;
+    }
 }
 
 // ── 开机自启：HKCU\...\Run 注册表项，值 = 当前 exe 路径 + --minimized ──
@@ -305,6 +347,8 @@ fn create_frontend_windows(app: &tauri::App<tauri::Wry>) -> tauri::Result<()> {
         assets_server.url_for("").trim_end_matches('/').to_string()
     };
 
+    let _ = FRONTEND_BASE.set(frontend_base.clone());
+
     for configured_window in &app.config().app.windows {
         let mut window = configured_window.clone();
         let tauri::WebviewUrl::App(asset_path) = &window.url else {
@@ -312,8 +356,28 @@ fn create_frontend_windows(app: &tauri::App<tauri::Wry>) -> tauri::Result<()> {
         };
         let url = format!("{frontend_base}/{}", asset_path.to_string_lossy());
         window.url = tauri::WebviewUrl::External(url.parse().expect("valid frontend URL"));
-        tauri::WebviewWindowBuilder::from_config(app.handle(), &window)?.build()?;
+        // 心跳脚本注入到该窗口的每个文档（含重新导航后的页面），
+        // 供看门狗判断 WebView2 是否又出现了加载失败
+        let heartbeat_script = format!(
+            "setInterval(function(){{try{{window.__TAURI_INTERNALS__.invoke('frontend_heartbeat',{{label:'{}'}})}}catch(e){{}}}},2000);",
+            window.label
+        );
+        tauri::WebviewWindowBuilder::from_config(app.handle(), &window)?
+            .initialization_script(heartbeat_script)
+            .build()?;
     }
+
+    {
+        let mut map = LIVENESS.lock().expect("liveness lock poisoned");
+        for window in &app.config().app.windows {
+            map.entry(window.label.clone())
+                .or_insert_with(FrontendLiveness::fresh);
+        }
+    }
+    let watchdog_handle = app.handle().clone();
+    let _ = std::thread::Builder::new()
+        .name("flowlens_watchdog".to_string())
+        .spawn(move || frontend_watchdog(watchdog_handle));
 
     Ok(())
 }
@@ -335,6 +399,79 @@ fn authorize_embedded_frontend(app: &tauri::App<tauri::Wry>, url_pattern: String
             .permission("core:window:allow-hide")
             .permission("core:window:allow-set-focus"),
     )
+}
+
+/// 心跳看门狗：某窗口 15s 无心跳即视为 WebView2 加载失败（连接拒绝错误页），
+/// 记录当时的真实 URL（用于事后定位根因）并重新导航；连续 3 次快速重试
+/// 无效后退避为 5 分钟一次，避免死循环；心跳恢复即清零。
+fn frontend_watchdog(app: tauri::AppHandle) {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let Ok(mut map) = LIVENESS.lock() else {
+            continue;
+        };
+        for (label, page) in FRONTEND_PAGES {
+            let Some(entry) = map.get_mut(*label) else {
+                continue;
+            };
+            if entry.last_beat.elapsed() < std::time::Duration::from_secs(15) {
+                continue;
+            }
+            let due = entry.reloads < 3
+                || entry
+                    .last_reload
+                    .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(300));
+            if !due {
+                continue;
+            }
+            let Some(base) = FRONTEND_BASE.get() else {
+                continue;
+            };
+            let Some(window) = app.get_webview_window(label) else {
+                continue;
+            };
+            let current = window
+                .url()
+                .map(|u| u.to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            let target = format!("{base}/{page}");
+            watchdog_log(&format!(
+                "{label} heartbeat stale, current={current}, reloading -> {target}"
+            ));
+            match window.navigate(target.parse().expect("valid frontend URL")) {
+                Ok(()) => {
+                    entry.reloads = entry.reloads.saturating_add(1).min(3);
+                    entry.last_reload = Some(std::time::Instant::now());
+                    // 给重新加载的页面留出启动时间再判断
+                    entry.last_beat = std::time::Instant::now();
+                }
+                Err(error) => {
+                    eprintln!("[flowlens] watchdog: {label} reload failed: {error}");
+                    watchdog_log(&format!("{label} reload failed: {error}"));
+                }
+            }
+        }
+    }
+}
+
+fn watchdog_log(line: &str) {
+    use std::io::Write;
+    let Some(dir) = traffic_history::store::data_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("frontend_watchdog.log"))
+    else {
+        return;
+    };
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let _ = writeln!(file, "[{secs}] {line}");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -430,6 +567,7 @@ pub fn run() {
             hide_window,
             autostart_status,
             autostart_set,
+            frontend_heartbeat,
         ])
         // 窗口关闭 = 最小化到托盘继续运行（真正退出请使用托盘菜单的「退出」）
         .on_window_event(|window, event| {

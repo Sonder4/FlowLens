@@ -22,4 +22,5 @@ commands.allow = [
   "hide_window",
   "autostart_status",
   "autostart_set",
+  "frontend_heartbeat",
 ]

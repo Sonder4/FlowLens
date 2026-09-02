@@ -684,6 +684,11 @@ fn migrate_legacy_data_dir(new_dir: &Path) {
     }
 }
 
+/// 数据目录（数据库所在目录），供看门狗日志等使用
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    default_db_path()?.parent().map(|d| d.to_path_buf())
+}
+
 fn default_db_path() -> Option<std::path::PathBuf> {
     // FLOWLENS_DATA_DIR：数据目录覆盖（例如指到非系统盘）。空值视为未设置。
     if let Some(dir) = std::env::var_os("FLOWLENS_DATA_DIR") {
