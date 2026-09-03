@@ -149,3 +149,50 @@ pcap 包 → 解析(etherparse) → 方向/族判定
 3. 分类规则为静态清单，未匹配的新软件进入"未归类"；可持续补充清单或引入用户自定义规则
 4. adapters 表为预留死表；known_adapters 命令未被前端使用
 5. 范围查询读 DB（60s 落盘周期），当前小时的实时数据由仪表盘的 liveHour 机制覆盖，历史页暂不合并实时内存桶总量（应用明细已合并）
+
+## 8. 抓包后端替代方案与授权评估
+
+### 8.1 现有 Npcap 方案的授权边界
+
+`pcap` Rust crate 只是 libpcap 的封装，Windows 上仍依赖 Npcap 驱动，替换封装库不能消除该依赖。Npcap 开源版本与 OEM 商业再分发条款不同；商业安装包若捆绑驱动，需按当前 Npcap/OEM 许可评估。FlowLens 的 MIT 许可不覆盖 Npcap，正式发布前应审核 [Npcap License](https://npcap.com/) 与 [Npcap OEM](https://npcap.com/oem/) 条款。若开源版要求用户自行安装 Npcap，可避免在安装包中再分发驱动，但会增加安装前置条件。
+
+### 8.2 候选方案对比
+
+| 方案 | 依赖/许可 | 进程归因 | 适配结论 |
+|---|---|---|---|
+| **WinDivert** | 自带驱动；LGPLv3 | `FLOW` 层可提供 PID，`NETWORK` 层提供包、方向和网卡索引 | **近期首选**；可复用 `etherparse`、聚合和 SQLite |
+| **Windows Filtering Platform (WFP)** | Windows 原生；无第三方运行时许可 | ALE 层提供连接/进程信息，Callout Driver 负责包级统计 | **商业化长期首选**，但需自行维护内核驱动 |
+| **NDIS Lightweight Filter** | 自研驱动 | 可自行实现，通常仍需结合 WFP/ALE | 控制力最强，开发、签名和维护成本最高 |
+| **ETW / PktMon** | Windows 内置 | 不稳定或缺少逐应用归因 | 适合诊断和辅助校验，不适合作为主抓包后端 |
+| **IP Helper / 性能计数器** | Windows 内置 | 可获得连接元数据和网卡总量 | 无法替代逐包、逐应用统计 |
+
+### 8.3 WinDivert 迁移设计
+
+WinDivert 工作在 IP 层，不提供 Ethernet 链路头，但 FlowLens 当前只需要 IPv4/IPv6、方向、网卡、端口和字节数，因此通常可以保留 `etherparse`。建议组合两个层次：
+
+```text
+FLOW 层：五元组/端点 → PID 映射
+NETWORK 层：数据包、方向、接口索引、IPv4/IPv6、长度
+        ↓
+统一 PacketEvent → 现有 app_cur / traffic_history / Tauri 事件
+```
+
+建议在 `capture.rs` 与业务逻辑之间抽象 `CaptureBackend`，保留现有 Pcap 后端并新增 WinDivert 后端。WinDivert 许可为 LGPLv3，商业软件通常可动态使用，但必须满足版权、许可通知、替换和修改条款；静态链接或修改驱动时应重新进行合规审查。
+
+参考：[WinDivert 文档](https://reqrypt.org/windivert-doc.html)、[WinDivert GitHub](https://github.com/basil00/WinDivert)、[LGPLv3](https://www.gnu.org/licenses/lgpl-3.0.html)。
+
+### 8.4 WFP 长期方案
+
+WFP 是 Windows 原生网络过滤框架，不是可直接替换 Npcap 的用户态库。推荐使用 ALE 层获取进程和连接上下文，使用 Network 层 Callout Driver 统计数据包，再把聚合结果发送到用户态服务。该方案可避免 Npcap OEM 和 LGPL 依赖，适合正式商业发行，但需要处理驱动签名、安装/升级、管理员权限、系统稳定性、VPN/杀毒软件兼容性和 Windows 版本差异。
+
+参考：[WFP 架构](https://learn.microsoft.com/windows-hardware/drivers/network/windows-filtering-platform-architecture)、[WFP Callout Driver](https://learn.microsoft.com/windows-hardware/drivers/network/using-callout-drivers)、[NDIS LWF](https://learn.microsoft.com/windows-hardware/drivers/network/ndis-lightweight-filter-drivers)。
+
+### 8.5 迁移与验证路线
+
+1. 定义统一 `PacketEvent`/`FlowEvent` 接口，保持数据库表、`traffic-tick`、`io-tick` 和前端页面不变。
+2. 先实现 WinDivert 后端，使用功能开关或构建 feature 选择 Pcap/WinDivert。
+3. 用 Wi-Fi、以太网、VPN、多网卡、IPv4/IPv6、TCP/UDP/QUIC、代理启停、睡眠唤醒和高流量下载进行对照测试。
+4. 对比网卡总量、应用归因覆盖率、丢包率、CPU/内存和长时间运行稳定性。
+5. 若进入商业化阶段，再评估 WFP Callout Driver；ETW/PktMon 仅作为故障诊断和结果校验工具。
+
+当前推荐顺序为：**WinDivert（近期替代）→ WFP（商业化长期方案）→ ETW/PktMon（诊断辅助）**。任何商业发行前均需以组件当前版本的许可证文本为准，并进行正式法律审核。
